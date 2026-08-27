@@ -1,0 +1,1 @@
+FROM node:22-alpine\nWORKDIR /app\nCOPY server/package*.json ./server/\nRUN cd server && npm install --omit=dev\nCOPY . .\nUSER node\nEXPOSE 8080\nCMD ["node","server/index.js"]\n

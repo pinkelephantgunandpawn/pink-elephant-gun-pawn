@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pinkelephant
+      POSTGRES_USER: pinkelephant
+      POSTGRES_PASSWORD: CHANGE_ME
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./server/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    ports:
+      - "5432:5432"
+  api:
+    build: ./server
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://pinkelephant:CHANGE_ME@db:5432/pinkelephant
+      JWT_SECRET: CHANGE_ME_TO_A_LONG_RANDOM_SECRET
+      CORS_ORIGIN: http://localhost:8080
+      ADMIN_EMAIL: admin@pinkelephant.example
+      ADMIN_PASSWORD: CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD
+    depends_on:
+      - db
+    ports:
+      - "8080:8080"
+volumes:
+  pgdata:
