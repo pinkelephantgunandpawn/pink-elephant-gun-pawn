@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: pink-elephant-site
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pink-elephant-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        value: https://pinkelephantgunandpawn.com
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: NODE_ENV
+        value: production
+databases:
+  - name: pink-elephant-db
+    databaseName: pinkelephant
+    user: pinkelephant
