@@ -64,3 +64,67 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS inventory_public_idx ON inventory(public_visible, quantity);
 CREATE INDEX IF NOT EXISTS sales_created_idx ON sales(created_at);
 CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_log(created_at);
+
+
+CREATE TABLE IF NOT EXISTS orders (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_number text UNIQUE NOT NULL,
+  customer_name text NOT NULL,
+  customer_email text NOT NULL,
+  customer_phone text NOT NULL,
+  fulfillment text NOT NULL CHECK (fulfillment IN ('pickup','shipping')),
+  shipping_address jsonb,
+  notes text NOT NULL DEFAULT '',
+  subtotal_cents integer NOT NULL CHECK (subtotal_cents >= 0),
+  tax_cents integer NOT NULL DEFAULT 0 CHECK (tax_cents >= 0),
+  shipping_cents integer NOT NULL DEFAULT 0 CHECK (shipping_cents >= 0),
+  total_cents integer NOT NULL CHECK (total_cents >= 0),
+  payment_status text NOT NULL DEFAULT 'pending' CHECK (payment_status IN ('pending','paid','refunded','cancelled')),
+  order_status text NOT NULL DEFAULT 'new' CHECK (order_status IN ('new','confirmed','ready','shipped','completed','cancelled')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS order_items (
+  id bigserial PRIMARY KEY,
+  order_id uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  inventory_id uuid REFERENCES inventory(id) ON DELETE SET NULL,
+  item_title text NOT NULL,
+  quantity integer NOT NULL CHECK (quantity > 0),
+  unit_price_cents integer NOT NULL CHECK (unit_price_cents >= 0),
+  line_total_cents integer NOT NULL CHECK (line_total_cents >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS orders_created_idx ON orders(created_at);
+CREATE INDEX IF NOT EXISTS order_items_order_idx ON order_items(order_id);
+
+
+-- OVERHAUL INVENTORY FIELDS
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS condition text NOT NULL DEFAULT 'Good';
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS sale_price_cents integer;
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS featured boolean NOT NULL DEFAULT false;
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS image_urls jsonb NOT NULL DEFAULT '[]'::jsonb;
+
+-- ORDER MANAGEMENT FIELDS
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_number text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS admin_notes text NOT NULL DEFAULT '';
+
+-- FIREARM / REGULATED ITEM REQUESTS
+CREATE TABLE IF NOT EXISTS ffl_requests (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_number text UNIQUE NOT NULL,
+  inventory_id uuid REFERENCES inventory(id) ON DELETE SET NULL,
+  item_title text NOT NULL,
+  customer_name text NOT NULL,
+  customer_email text NOT NULL,
+  customer_phone text NOT NULL,
+  request_type text NOT NULL CHECK (request_type IN ('store_pickup','ffl_transfer')),
+  destination_state text,
+  receiving_ffl_name text,
+  receiving_ffl_phone text,
+  notes text NOT NULL DEFAULT '',
+  status text NOT NULL DEFAULT 'new' CHECK (status IN ('new','contacted','awaiting_ffl','ready','completed','declined','cancelled')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ffl_requests_created_idx ON ffl_requests(created_at);
