@@ -32,7 +32,14 @@ app.use(express.static(path.join(__dirname,'..')));
 app.get('/', (_req,res)=>res.sendFile(path.join(__dirname,'..','index.html')));
 app.get('/admin', (_req,res)=>res.sendFile(path.join(__dirname,'..','admin.html')));
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',').map(s=>s.trim()) || false, credentials: true }));
+app.use(cors({
+  origin: [
+    "https://pinkelephantgunandpawn.com",
+    "https://www.pinkelephantgunandpawn.com",
+    "https://pink-elephant-gun-pawn.onrender.com"
+  ],
+  credentials: true
+}));
 app.use(express.json({ limit: '1mb' }));
 app.use(rateLimit({ windowMs: 15*60*1000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false }));
 const loginLimit = rateLimit({ windowMs: 15*60*1000, limit: 10, message: { error:'Too many login attempts. Try again later.' } });
