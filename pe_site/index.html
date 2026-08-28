@@ -75,7 +75,7 @@ let cart=[];
 try{cart=JSON.parse(localStorage.getItem('pe_cart')||'[]')}catch{cart=[]}
 function saveCart(){localStorage.setItem('pe_cart',JSON.stringify(cart));renderCart()}
 function imageBlock(x,cls='pic'){return x.image_url?`<div class="${cls}"><img src="${esc(x.image_url)}" alt="${esc(x.title)}" onerror="this.parentElement.classList.add('noimg');this.parentElement.innerHTML='Photo unavailable'"></div>`:`<div class="${cls} noimg">Photo coming soon</div>`}
-function effectivePrice(x){return x.sale_price_cents!=null?x.sale_price_cents::x.price_cents}
+function effectivePrice(x){return x.sale_price_cents!=null?x.sale_price_cents:x.price_cents}
 function itemPrice(x){return effectivePrice(x)!=null?money(effectivePrice(x)):(x.price_label||'Call for price')}
 function priceHtml(x){return x.sale_price_cents!=null?`${money(x.sale_price_cents)} <span class="saleOld">${money(x.price_cents)}</span>`:esc(itemPrice(x))}
 function canBuy(x){return !x.regulated && effectivePrice(x)!=null && Number(x.quantity)>0}
