@@ -128,3 +128,33 @@ CREATE TABLE IF NOT EXISTS ffl_requests (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ffl_requests_created_idx ON ffl_requests(created_at);
+
+
+-- PROFESSIONAL FIREARM CHECKOUT / FFL DIRECTORY
+CREATE TABLE IF NOT EXISTS ffl_dealers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  address1 text NOT NULL,
+  city text NOT NULL,
+  state text NOT NULL,
+  postal text NOT NULL,
+  phone text,
+  email text,
+  license_on_file boolean NOT NULL DEFAULT false,
+  preferred boolean NOT NULL DEFAULT false,
+  active boolean NOT NULL DEFAULT true,
+  latitude numeric,
+  longitude numeric,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ffl_dealers_search_idx ON ffl_dealers(active,state,postal);
+
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS dealer_id uuid REFERENCES ffl_dealers(id) ON DELETE SET NULL;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS dealer_snapshot jsonb;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS customer_address jsonb;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS shipping_method text NOT NULL DEFAULT 'store_review';
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_status text NOT NULL DEFAULT 'pending_review';
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS quoted_total_cents integer;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS age_certified boolean NOT NULL DEFAULT false;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_restocked boolean NOT NULL DEFAULT false;
