@@ -101,18 +101,17 @@ const shippingQuoteSchema=z.object({
 app.post('/api/public/shipping-rates',checkoutLimit,async(req,res)=>{
   const p=shippingQuoteSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Enter your contact and shipping address first.'});
   try{
-    // Confirm the cart only contains live, non-regulated inventory before asking Shippo for rates.
+    // Confirm cart availability and build parcels from each inventory item's saved package data.
+    const parcels=[];
     for(const requested of p.data.items){
-      const inv=(await pool.query('SELECT id,quantity,regulated,public_visible FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];
+      const inv=(await pool.query('SELECT id,title,quantity,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];
       if(!inv||!inv.public_visible||inv.quantity<requested.quantity)return res.status(409).json({error:'An item in your cart is no longer available.'});
       if(inv.regulated)return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});
+      const dims=[inv.shipping_weight_lb,inv.shipping_length_in,inv.shipping_width_in,inv.shipping_height_in].map(Number);
+      if(dims.some(v=>!Number.isFinite(v)||v<=0))return res.status(400).json({error:`Shipping size/weight is not set for ${inv.title}. Please call the shop for shipping.`});
+      for(let n=0;n<requested.quantity;n++)parcels.push({length:String(inv.shipping_length_in),width:String(inv.shipping_width_in),height:String(inv.shipping_height_in),distance_unit:'in',weight:String(inv.shipping_weight_lb),mass_unit:'lb'});
     }
-    // TEST FOUNDATION: inventory does not have package dimensions/weight yet, so use a configurable test parcel.
-    const parcel={
-      length:String(process.env.SHIP_TEST_LENGTH_IN||12),width:String(process.env.SHIP_TEST_WIDTH_IN||10),height:String(process.env.SHIP_TEST_HEIGHT_IN||6),distance_unit:'in',
-      weight:String(process.env.SHIP_TEST_WEIGHT_LB||3),mass_unit:'lb'
-    };
-    const body={address_from:shipFromAddress(),address_to:{name:p.data.customer.name,street1:p.data.shipping.address1,city:p.data.shipping.city,state:p.data.shipping.state.toUpperCase(),zip:p.data.shipping.postal,country:'US',phone:p.data.customer.phone,email:p.data.customer.email},parcels:[parcel],async:false};
+    const body={address_from:shipFromAddress(),address_to:{name:p.data.customer.name,street1:p.data.shipping.address1,city:p.data.shipping.city,state:p.data.shipping.state.toUpperCase(),zip:p.data.shipping.postal,country:'US',phone:p.data.customer.phone,email:p.data.customer.email},parcels,async:false};
     const r=await fetch(SHIPPO_API+'/shipments/',{method:'POST',headers:shippoHeaders(),body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(j.detail||j.message||j.error||'Shippo could not create a rate quote.');
@@ -120,7 +119,7 @@ app.post('/api/public/shipping-rates',checkoutLimit,async(req,res)=>{
       rate_id:x.object_id,shipment_id:j.object_id,provider:x.provider||'',service:x.servicelevel?.name||x.servicelevel?.token||'Shipping',amount_cents:Math.round(Number(x.amount)*100),currency:x.currency||'USD',estimated_days:x.estimated_days??null,duration_terms:x.duration_terms||'',test:!!x.test
     })).sort((a,b)=>a.amount_cents-b.amount_cents).slice(0,12);
     if(!rates.length)return res.status(502).json({error:'Shippo returned no shipping rates for this address.'});
-    res.json({rates,test_mode:rates.every(x=>x.test),parcel_note:`Test parcel: ${parcel.length}×${parcel.width}×${parcel.height} in, ${parcel.weight} lb`});
+    res.json({rates,test_mode:rates.every(x=>x.test),parcel_note:`Package data loaded from inventory (${parcels.length} parcel${parcels.length===1?'':'s'}).`});
   }catch(e){console.error(e);res.status(e.status||502).json({error:e.message||'Could not load shipping rates.'})}
 });
 async function verifyShippoRate(rateId,shipmentId){
@@ -179,16 +178,16 @@ app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
   }finally{c.release()}
 });
 
-const inventorySchema=z.object({title:z.string().min(1).max(180),category:z.string().min(1).max(80),quantity:z.number().int().min(0),cost_cents:z.number().int().min(0),price_cents:z.number().int().min(0).nullable().optional(),price_label:z.string().max(80).nullable().optional(),sku:z.string().max(80).nullable().optional(),item_type:z.enum(['quantity','individual']),low_stock:z.number().int().min(0),description:z.string().max(5000),image_url:z.string().max(5*1024*1024).refine(v=>/^https?:\/\//i.test(v)||/^data:image\/(jpeg|png|webp);base64,/i.test(v),'Image must be an http(s) URL or uploaded image').nullable().optional(),image_urls:z.array(z.string().max(5*1024*1024)).max(4).default([]),condition:z.string().min(1).max(80).default('Good'),sale_price_cents:z.number().int().min(0).nullable().optional(),featured:z.boolean().default(false),regulated:z.boolean().default(false),public_visible:z.boolean().default(true)});
+const inventorySchema=z.object({title:z.string().min(1).max(180),category:z.string().min(1).max(80),quantity:z.number().int().min(0),cost_cents:z.number().int().min(0),price_cents:z.number().int().min(0).nullable().optional(),price_label:z.string().max(80).nullable().optional(),sku:z.string().max(80).nullable().optional(),item_type:z.enum(['quantity','individual']),low_stock:z.number().int().min(0),description:z.string().max(5000),image_url:z.string().max(5*1024*1024).refine(v=>/^https?:\/\//i.test(v)||/^data:image\/(jpeg|png|webp);base64,/i.test(v),'Image must be an http(s) URL or uploaded image').nullable().optional(),image_urls:z.array(z.string().max(5*1024*1024)).max(4).default([]),condition:z.string().min(1).max(80).default('Good'),sale_price_cents:z.number().int().min(0).nullable().optional(),featured:z.boolean().default(false),regulated:z.boolean().default(false),public_visible:z.boolean().default(true),shipping_weight_lb:z.number().positive().nullable().optional(),shipping_length_in:z.number().positive().nullable().optional(),shipping_width_in:z.number().positive().nullable().optional(),shipping_height_in:z.number().positive().nullable().optional()});
 app.get('/api/inventory',auth,requireRole('viewer'),async (_req,res)=>{const {rows}=await pool.query('SELECT * FROM inventory ORDER BY updated_at DESC');res.json(rows);});
 app.post('/api/inventory',auth,requireRole('manager'),async (req,res)=>{
   const p=inventorySchema.safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const x=p.data;
-  const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,[x.title,x.category,x.quantity,x.cost_cents,x.price_cents??null,x.price_label??null,x.sku||null,x.item_type,x.low_stock,x.description,x.image_url??(x.image_urls?.[0]||null),JSON.stringify(x.image_urls||[]),x.condition,x.sale_price_cents??null,x.featured,x.regulated,x.public_visible]);
+  const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`,[x.title,x.category,x.quantity,x.cost_cents,x.price_cents??null,x.price_label??null,x.sku||null,x.item_type,x.low_stock,x.description,x.image_url??(x.image_urls?.[0]||null),JSON.stringify(x.image_urls||[]),x.condition,x.sale_price_cents??null,x.featured,x.regulated,x.public_visible,x.shipping_weight_lb??null,x.shipping_length_in??null,x.shipping_width_in??null,x.shipping_height_in??null]);
   await audit(req,'CREATE','inventory',rows[0].id,{title:x.title,regulated:x.regulated}); res.status(201).json(rows[0]);
 });
 app.patch('/api/inventory/:id',auth,requireRole('manager'),async (req,res)=>{
   const p=inventorySchema.partial().safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const keys=Object.keys(p.data); if(!keys.length)return res.status(400).json({error:'No changes'});
-  const map={price_cents:'price_cents',price_label:'price_label',title:'title',category:'category',quantity:'quantity',cost_cents:'cost_cents',sku:'sku',item_type:'item_type',low_stock:'low_stock',description:'description',image_url:'image_url',image_urls:'image_urls',condition:'condition',sale_price_cents:'sale_price_cents',featured:'featured',regulated:'regulated',public_visible:'public_visible'};
+  const map={price_cents:'price_cents',price_label:'price_label',title:'title',category:'category',quantity:'quantity',cost_cents:'cost_cents',sku:'sku',item_type:'item_type',low_stock:'low_stock',description:'description',image_url:'image_url',image_urls:'image_urls',condition:'condition',sale_price_cents:'sale_price_cents',featured:'featured',regulated:'regulated',public_visible:'public_visible',shipping_weight_lb:'shipping_weight_lb',shipping_length_in:'shipping_length_in',shipping_width_in:'shipping_width_in',shipping_height_in:'shipping_height_in'};
   const vals=[]; const sets=[]; keys.forEach((k,i)=>{sets.push(`${map[k]}=$${i+1}`); vals.push(k==='image_urls'?JSON.stringify(p.data[k]||[]):(p.data[k]??null))}); vals.push(req.params.id);
   const {rows}=await pool.query(`UPDATE inventory SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals); if(!rows[0])return res.status(404).json({error:'Inventory item not found'});
   await audit(req,'UPDATE','inventory',rows[0].id,{fields:keys}); res.json(rows[0]);
@@ -293,4 +292,3 @@ app.post('/api/batches/:id/publish',auth,requireRole('manager'),async(req,res)=>
 app.get('/api/audit',auth,requireRole('admin'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,user_id,action,entity_type,entity_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 500');res.json(rows);});
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).json({error:'Internal server error'});});
 ensureSchema().then(()=>ensureBootstrapAdmin()).then(()=>app.listen(port,'0.0.0.0',()=>console.log(`Pink Elephant API listening on ${port}`))).catch(err=>{console.error(err);process.exit(1)});
-
