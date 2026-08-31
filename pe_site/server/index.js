@@ -293,4 +293,4 @@ app.post('/api/batches/:id/publish',auth,requireRole('manager'),async(req,res)=>
 app.get('/api/audit',auth,requireRole('admin'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,user_id,action,entity_type,entity_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 500');res.json(rows);});
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).json({error:'Internal server error'});});
 ensureSchema().then(()=>ensureBootstrapAdmin()).then(()=>app.listen(port,'0.0.0.0',()=>console.log(`Pink Elephant API listening on ${port}`))).catch(err=>{console.error(err);process.exit(1)});
-s
+
