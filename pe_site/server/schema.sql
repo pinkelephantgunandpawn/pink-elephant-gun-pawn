@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS inventory (
   image_url text,
   regulated boolean NOT NULL DEFAULT false,
   public_visible boolean NOT NULL DEFAULT true,
+  shipping_weight_lb numeric(10,3),
+  shipping_length_in numeric(10,2),
+  shipping_width_in numeric(10,2),
+  shipping_height_in numeric(10,2),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -201,3 +205,10 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_provider text;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_service text;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS shippo_transaction_id text;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_label_url text;
+
+
+-- Shipping package fields for Shippo live-rate quoting
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS shipping_weight_lb numeric(10,3);
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS shipping_length_in numeric(10,2);
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS shipping_width_in numeric(10,2);
+ALTER TABLE inventory ADD COLUMN IF NOT EXISTS shipping_height_in numeric(10,2);
