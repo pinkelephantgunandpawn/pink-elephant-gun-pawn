@@ -158,3 +158,37 @@ ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_status text NOT NULL D
 ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS quoted_total_cents integer;
 ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS age_certified boolean NOT NULL DEFAULT false;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_restocked boolean NOT NULL DEFAULT false;
+
+
+-- BATCH INVENTORY INTAKE / REVIEW QUEUE
+CREATE TABLE IF NOT EXISTS batch_uploads (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','review','published')),
+  created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS batch_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id uuid NOT NULL REFERENCES batch_uploads(id) ON DELETE CASCADE,
+  inventory_id uuid REFERENCES inventory(id) ON DELETE SET NULL,
+  filename text NOT NULL DEFAULT 'photo.jpg',
+  image_data text NOT NULL,
+  title text NOT NULL DEFAULT '',
+  suggested_title text,
+  category text NOT NULL DEFAULT 'Other',
+  condition text NOT NULL DEFAULT 'Good',
+  quantity integer NOT NULL DEFAULT 1 CHECK (quantity > 0),
+  price_cents integer,
+  suggested_price_cents integer,
+  market_low_cents integer,
+  market_high_cents integer,
+  confidence numeric,
+  source_label text,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','analyzed','reviewed','published','error')),
+  notes text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS batch_items_batch_idx ON batch_items(batch_id,created_at);
