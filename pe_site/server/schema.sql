@@ -192,3 +192,12 @@ CREATE TABLE IF NOT EXISTS batch_items (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS batch_items_batch_idx ON batch_items(batch_id,created_at);
+
+
+-- SHIPPO SHIPPING RATE / FULFILLMENT FOUNDATION
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shippo_rate_id text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shippo_shipment_id text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_provider text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_service text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shippo_transaction_id text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_label_url text;
