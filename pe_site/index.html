@@ -151,7 +151,8 @@ function closeCheckout(){document.getElementById('checkoutModal').classList.remo
 document.getElementById('checkoutForm').addEventListener('submit',async e=>{
   e.preventDefault();
   if(!cart.length)return;
-  const f=new FormData(e.currentTarget);
+  const form=e.currentTarget;
+  const f=new FormData(form);
   const msg=document.getElementById('checkoutMsg'),btn=document.getElementById('placeOrderBtn');
   btn.disabled=true;btn.textContent='PLACING ORDER...';
   const payload={
@@ -167,7 +168,7 @@ document.getElementById('checkoutForm').addEventListener('submit',async e=>{
     if(!r.ok)throw new Error(j.error||'Could not place order');
     msg.className='full checkoutMsg show good';
     msg.innerHTML=`<b>Order received!</b><br>Order #${esc(j.order_number)}. We’ll contact you to confirm payment${payload.fulfillment==='shipping'?' and shipping':' and pickup'}.`;
-    cart=[];saveCart();e.currentTarget.reset();toggleShipping();
+    cart=[];saveCart();form.reset();toggleShipping();
     btn.style.display='none';
   }catch(err){
     msg.className='full checkoutMsg show bad';msg.textContent=err.message||'Could not place order';
