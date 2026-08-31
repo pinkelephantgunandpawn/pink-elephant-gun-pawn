@@ -76,10 +76,67 @@ app.get('/api/public/inventory',async (_req,res)=>{
   res.json(rows);
 });
 
+// ---------- SHIPPO TEST SHIPPING RATES ----------
+const SHIPPO_API='https://api.goshippo.com';
+function shippoHeaders(){
+  const token=process.env.SHIPPO_API_TOKEN?.trim();
+  if(!token){const e=new Error('SHIPPO_API_TOKEN is not configured');e.status=503;throw e}
+  return {'Authorization':'ShippoToken '+token,'Content-Type':'application/json'};
+}
+function shipFromAddress(){return {
+  name:process.env.SHIP_FROM_NAME||'Pink Elephant Gun & Pawn',
+  company:process.env.SHIP_FROM_COMPANY||'Pink Elephant Gun & Pawn',
+  street1:process.env.SHIP_FROM_STREET1||'30 Colonels Ct',
+  city:process.env.SHIP_FROM_CITY||'Prestonsburg',
+  state:process.env.SHIP_FROM_STATE||'KY',
+  zip:process.env.SHIP_FROM_ZIP||'41653',
+  country:'US',
+  phone:process.env.SHIP_FROM_PHONE||'6065065030'
+}}
+const shippingQuoteSchema=z.object({
+  customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40)}),
+  shipping:z.object({address1:z.string().trim().min(3).max(180),city:z.string().trim().min(2).max(100),state:z.string().trim().min(2).max(50),postal:z.string().trim().min(3).max(20)}),
+  items:z.array(z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive().max(99)})).min(1).max(25)
+});
+app.post('/api/public/shipping-rates',checkoutLimit,async(req,res)=>{
+  const p=shippingQuoteSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Enter your contact and shipping address first.'});
+  try{
+    // Confirm the cart only contains live, non-regulated inventory before asking Shippo for rates.
+    for(const requested of p.data.items){
+      const inv=(await pool.query('SELECT id,quantity,regulated,public_visible FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];
+      if(!inv||!inv.public_visible||inv.quantity<requested.quantity)return res.status(409).json({error:'An item in your cart is no longer available.'});
+      if(inv.regulated)return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});
+    }
+    // TEST FOUNDATION: inventory does not have package dimensions/weight yet, so use a configurable test parcel.
+    const parcel={
+      length:String(process.env.SHIP_TEST_LENGTH_IN||12),width:String(process.env.SHIP_TEST_WIDTH_IN||10),height:String(process.env.SHIP_TEST_HEIGHT_IN||6),distance_unit:'in',
+      weight:String(process.env.SHIP_TEST_WEIGHT_LB||3),mass_unit:'lb'
+    };
+    const body={address_from:shipFromAddress(),address_to:{name:p.data.customer.name,street1:p.data.shipping.address1,city:p.data.shipping.city,state:p.data.shipping.state.toUpperCase(),zip:p.data.shipping.postal,country:'US',phone:p.data.customer.phone,email:p.data.customer.email},parcels:[parcel],async:false};
+    const r=await fetch(SHIPPO_API+'/shipments/',{method:'POST',headers:shippoHeaders(),body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(j.detail||j.message||j.error||'Shippo could not create a rate quote.');
+    const rates=(j.rates||[]).filter(x=>x.object_id&&Number.isFinite(Number(x.amount))).map(x=>({
+      rate_id:x.object_id,shipment_id:j.object_id,provider:x.provider||'',service:x.servicelevel?.name||x.servicelevel?.token||'Shipping',amount_cents:Math.round(Number(x.amount)*100),currency:x.currency||'USD',estimated_days:x.estimated_days??null,duration_terms:x.duration_terms||'',test:!!x.test
+    })).sort((a,b)=>a.amount_cents-b.amount_cents).slice(0,12);
+    if(!rates.length)return res.status(502).json({error:'Shippo returned no shipping rates for this address.'});
+    res.json({rates,test_mode:rates.every(x=>x.test),parcel_note:`Test parcel: ${parcel.length}×${parcel.width}×${parcel.height} in, ${parcel.weight} lb`});
+  }catch(e){console.error(e);res.status(e.status||502).json({error:e.message||'Could not load shipping rates.'})}
+});
+async function verifyShippoRate(rateId,shipmentId){
+  const r=await fetch(SHIPPO_API+'/rates/'+encodeURIComponent(rateId),{headers:shippoHeaders()});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||j.message||'Could not verify the selected shipping rate.');
+  if(shipmentId&&j.shipment!==shipmentId)throw new Error('The selected shipping rate does not match this quote.');
+  const cents=Math.round(Number(j.amount)*100);if(!Number.isFinite(cents)||cents<0)throw new Error('The selected shipping rate is invalid.');
+  return {cents,provider:j.provider||'',service:j.servicelevel?.name||j.servicelevel?.token||'Shipping',rate_id:j.object_id,shipment_id:j.shipment||shipmentId||null,test:!!j.test};
+}
+
 const publicOrderSchema=z.object({
   customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40)}),
   fulfillment:z.enum(['pickup','shipping']),
   shipping:z.object({address1:z.string().trim().min(3).max(180),city:z.string().trim().min(2).max(100),state:z.string().trim().min(2).max(50),postal:z.string().trim().min(3).max(20)}).nullable().optional(),
+  shippo_rate_id:z.string().trim().max(120).nullable().optional(),
+  shippo_shipment_id:z.string().trim().max(120).nullable().optional(),
   notes:z.string().trim().max(1000).default(''),
   items:z.array(z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive().max(99)})).min(1).max(25)
 });
@@ -87,6 +144,9 @@ app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
   const p=publicOrderSchema.safeParse(req.body);
   if(!p.success)return res.status(400).json({error:'Please check the checkout information and try again.'});
   if(p.data.fulfillment==='shipping'&&!p.data.shipping)return res.status(400).json({error:'Shipping address is required.'});
+  if(p.data.fulfillment==='shipping'&&!p.data.shippo_rate_id)return res.status(400).json({error:'Choose a shipping rate before placing the order.'});
+  let verifiedShipping=null;
+  try{if(p.data.fulfillment==='shipping')verifiedShipping=await verifyShippoRate(p.data.shippo_rate_id,p.data.shippo_shipment_id)}catch(e){return res.status(400).json({error:e.message||'Could not verify shipping rate.'})}
   const c=await pool.connect();
   try{
     await c.query('BEGIN');
@@ -103,8 +163,9 @@ app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
     }
     const orderNumber='PE-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
     const shippingAddress=p.data.fulfillment==='shipping'?p.data.shipping:null;
-    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents) VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,0,$8) RETURNING id,order_number,subtotal_cents,total_cents,order_status,payment_status`,
-      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal])).rows[0];
+    const shippingCents=verifiedShipping?.cents||0; const total=subtotal+shippingCents;
+    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service) VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11,$12,$13,$14) RETURNING id,order_number,subtotal_cents,shipping_cents,total_cents,order_status,payment_status`,
+      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal,shippingCents,total,verifiedShipping?.rate_id||null,verifiedShipping?.shipment_id||null,verifiedShipping?.provider||null,verifiedShipping?.service||null])).rows[0];
     for(const item of items){
       await c.query(`INSERT INTO order_items(order_id,inventory_id,item_title,quantity,unit_price_cents,line_total_cents) VALUES($1,$2,$3,$4,$5,$6)`,
         [order.id,item.inv.id,item.inv.title,item.quantity,item.unit,item.line]);
@@ -232,3 +293,4 @@ app.post('/api/batches/:id/publish',auth,requireRole('manager'),async(req,res)=>
 app.get('/api/audit',auth,requireRole('admin'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,user_id,action,entity_type,entity_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 500');res.json(rows);});
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).json({error:'Internal server error'});});
 ensureSchema().then(()=>ensureBootstrapAdmin()).then(()=>app.listen(port,'0.0.0.0',()=>console.log(`Pink Elephant API listening on ${port}`))).catch(err=>{console.error(err);process.exit(1)});
+s
