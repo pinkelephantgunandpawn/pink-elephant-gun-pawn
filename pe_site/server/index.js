@@ -131,8 +131,7 @@ function shipFromAddress(){return {
   state:process.env.SHIP_FROM_STATE||'KY',
   zip:process.env.SHIP_FROM_ZIP||'41653',
   country:'US',
-  phone:process.env.SHIP_FROM_PHONE||'6065065030',
-  email:process.env.SHIP_FROM_EMAIL||''
+  phone:process.env.SHIP_FROM_PHONE||'6065065030'
 }}
 const shippingQuoteSchema=z.object({
   customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40)}),
@@ -191,7 +190,85 @@ const publicOrderSchema=z.object({
   notes:z.string().trim().max(1000).default(''),
   items:z.array(z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive().max(99)})).min(1).max(25)
 });
+
+const customerAuth=(req,res,next)=>{
+  try{
+    const raw=req.headers.authorization||'';
+    const token=raw.startsWith('Bearer ')?raw.slice(7):'';
+    if(!token)return res.status(401).json({error:'Sign in required'});
+    const data=jwt.verify(token,process.env.JWT_SECRET);
+    if(data.type!=='customer'||!data.customer_id)return res.status(401).json({error:'Invalid customer session'});
+    req.customer={id:Number(data.customer_id),email:data.email};
+    next();
+  }catch(e){return res.status(401).json({error:'Invalid or expired customer session'})}
+};
+
+app.post('/api/public/customer/register',async(req,res)=>{
+  try{
+    const email=String(req.body?.email||'').trim().toLowerCase();
+    const password=String(req.body?.password||'');
+    const name=String(req.body?.name||'').trim();
+    const phone=String(req.body?.phone||'').trim();
+    if(!email||!email.includes('@'))return res.status(400).json({error:'Valid email required'});
+    if(password.length<8)return res.status(400).json({error:'Password must be at least 8 characters'});
+    const exists=await pool.query('select id from customers where email=$1',[email]);
+    if(exists.rowCount)return res.status(409).json({error:'An account already exists for that email'});
+    const hash=await bcrypt.hash(password,12);
+    const q=await pool.query(
+      `insert into customers(email,password_hash,name,phone) values($1,$2,$3,$4)
+       returning id,email,name,phone,created_at`,
+      [email,hash,name||null,phone||null]
+    );
+    const c=q.rows[0];
+    const token=jwt.sign({type:'customer',customer_id:c.id,email:c.email},process.env.JWT_SECRET,{expiresIn:'30d'});
+    res.status(201).json({token,customer:c});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not create account'})}
+});
+
+app.post('/api/public/customer/login',async(req,res)=>{
+  try{
+    const email=String(req.body?.email||'').trim().toLowerCase();
+    const password=String(req.body?.password||'');
+    const q=await pool.query('select * from customers where email=$1',[email]);
+    if(!q.rowCount)return res.status(401).json({error:'Invalid email or password'});
+    const c=q.rows[0];
+    if(!await bcrypt.compare(password,c.password_hash))return res.status(401).json({error:'Invalid email or password'});
+    const token=jwt.sign({type:'customer',customer_id:c.id,email:c.email},process.env.JWT_SECRET,{expiresIn:'30d'});
+    res.json({token,customer:{id:c.id,email:c.email,name:c.name,phone:c.phone,created_at:c.created_at}});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not sign in'})}
+});
+
+app.get('/api/customer/me',customerAuth,async(req,res)=>{
+  try{
+    const q=await pool.query('select id,email,name,phone,created_at from customers where id=$1',[req.customer.id]);
+    if(!q.rowCount)return res.status(404).json({error:'Customer not found'});
+    res.json(q.rows[0]);
+  }catch(e){res.status(500).json({error:'Could not load account'})}
+});
+
+app.get('/api/customer/orders',customerAuth,async(req,res)=>{
+  try{
+    const q=await pool.query(
+      `select o.*,coalesce(json_agg(json_build_object('title',oi.title,'quantity',oi.quantity,'unit_price_cents',oi.unit_price_cents)) filter (where oi.id is not null),'[]') items
+       from orders o left join order_items oi on oi.order_id=o.id
+       where o.customer_id=$1 or lower(o.customer_email)=lower($2)
+       group by o.id order by o.created_at desc`,
+      [req.customer.id,req.customer.email]
+    );
+    res.json(q.rows);
+  }catch(e){console.error(e);res.status(500).json({error:'Could not load orders'})}
+});
+
 app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
+  let checkoutCustomerId=null;
+  try{
+    const raw=req.headers.authorization||'';
+    if(raw.startsWith('Bearer ')){
+      const data=jwt.verify(raw.slice(7),process.env.JWT_SECRET);
+      if(data.type==='customer'&&data.customer_id)checkoutCustomerId=Number(data.customer_id);
+    }
+  }catch(_){}
+
   const p=publicOrderSchema.safeParse(req.body);
   if(!p.success)return res.status(400).json({error:'Please check the checkout information and try again.'});
   if(p.data.fulfillment==='shipping'&&!p.data.shipping)return res.status(400).json({error:'Shipping address is required.'});
@@ -217,8 +294,8 @@ app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
     const shippingCents=verifiedShipping?.cents||0;
     const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents,state:p.data.shipping?.state,fulfillment:p.data.fulfillment});
     const total=subtotal+shippingCents+tax.tax_cents;
-    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id,order_number,subtotal_cents,tax_cents,shipping_cents,total_cents,order_status,payment_status`,
-      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal,tax.tax_cents,shippingCents,total,verifiedShipping?.rate_id||null,verifiedShipping?.shipment_id||null,verifiedShipping?.provider||null,verifiedShipping?.service||null])).rows[0];
+    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service,customer_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id,order_number,subtotal_cents,tax_cents,shipping_cents,total_cents,order_status,payment_status`,
+      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal,tax.tax_cents,shippingCents,total,verifiedShipping?.rate_id||null,verifiedShipping?.shipment_id||null,verifiedShipping?.provider||null,verifiedShipping?.service||null,checkoutCustomerId])).rows[0];
     for(const item of items){
       await c.query(`INSERT INTO order_items(order_id,inventory_id,item_title,quantity,unit_price_cents,line_total_cents) VALUES($1,$2,$3,$4,$5,$6)`,
         [order.id,item.inv.id,item.inv.title,item.quantity,item.unit,item.line]);
@@ -237,7 +314,7 @@ const inventorySchema=z.object({title:z.string().min(1).max(180),category:z.stri
 app.get('/api/inventory',auth,requireRole('viewer'),async (_req,res)=>{const {rows}=await pool.query('SELECT * FROM inventory ORDER BY updated_at DESC');res.json(rows);});
 app.post('/api/inventory',auth,requireRole('manager'),async (req,res)=>{
   const p=inventorySchema.safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const x=p.data;
-  const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`,[x.title,x.category,x.quantity,x.cost_cents,x.price_cents??null,x.price_label??null,x.sku||null,x.item_type,x.low_stock,x.description,x.image_url??(x.image_urls?.[0]||null),JSON.stringify(x.image_urls||[]),x.condition,x.sale_price_cents??null,x.featured,x.regulated,x.public_visible,x.shipping_weight_lb??null,x.shipping_length_in??null,x.shipping_width_in??null,x.shipping_height_in??null]);
+  const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,[x.title,x.category,x.quantity,x.cost_cents,x.price_cents??null,x.price_label??null,x.sku||null,x.item_type,x.low_stock,x.description,x.image_url??(x.image_urls?.[0,checkoutCustomerId]||null),JSON.stringify(x.image_urls||[]),x.condition,x.sale_price_cents??null,x.featured,x.regulated,x.public_visible,x.shipping_weight_lb??null,x.shipping_length_in??null,x.shipping_width_in??null,x.shipping_height_in??null]);
   await audit(req,'CREATE','inventory',rows[0].id,{title:x.title,regulated:x.regulated}); res.status(201).json(rows[0]);
 });
 app.patch('/api/inventory/:id',auth,requireRole('manager'),async (req,res)=>{
