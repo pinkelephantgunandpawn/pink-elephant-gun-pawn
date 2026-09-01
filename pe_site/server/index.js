@@ -82,7 +82,7 @@ async function sendOrderConfirmation(orderId){
   const from=process.env.ORDER_FROM_EMAIL||process.env.SMTP_USER;
   const text=`Thanks for your order with Pink Elephant Gun & Pawn.\n\nOrder ${o.order_number}\n${lines}\n\nSubtotal: ${money(o.subtotal_cents)}\nTax: ${money(o.tax_cents)}\nShipping: ${money(o.shipping_cents)}\nTotal: ${money(o.total_cents)}\n\nPayment status: ${o.payment_status}.`;
   try{await tx.sendMail({from,to:o.customer_email,subject:`Pink Elephant order ${o.order_number}`,text});await pool.query('UPDATE orders SET customer_email_sent_at=now(),customer_email_error=NULL WHERE id=$1',[o.id]);return {sent:true}}
-  catch(e){await pool.query('UPDATE orders SET customer_email_error=$1 WHERE id=$2',[String(e.message||e).slice(0,1000),o.id]);return {sent:false,reason:e.message||'Email failed'}}
+  catch(e){const detail=`SMTP ERROR code=${e?.code||'unknown'} command=${e?.command||'unknown'} host=${process.env.SMTP_HOST||'missing'} port=${process.env.SMTP_PORT||'587'} secure=${process.env.SMTP_SECURE||'false'} message=${e?.message||e}`;console.error(detail);await pool.query('UPDATE orders SET customer_email_error=$1 WHERE id=$2',[detail.slice(0,1000),o.id]);return {sent:false,reason:detail}}
 }
 
 
