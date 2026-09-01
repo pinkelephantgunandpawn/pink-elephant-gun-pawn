@@ -7,6 +7,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import { z } from 'zod';
+import nodemailer from 'nodemailer';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +46,45 @@ app.use(express.json({ limit: '6mb' }));
 app.use(rateLimit({ windowMs: 15*60*1000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false }));
 const loginLimit = rateLimit({ windowMs: 15*60*1000, limit: 10, message: { error:'Too many login attempts. Try again later.' } });
 const checkoutLimit = rateLimit({ windowMs: 15*60*1000, limit: 12, message: { error:'Too many checkout attempts. Try again shortly.' } });
+
+function taxConfig(){
+  const taxableStates=String(process.env.TAXABLE_STATES||'KY').split(',').map(x=>x.trim().toUpperCase()).filter(Boolean);
+  const storeState=String(process.env.STORE_STATE||'KY').trim().toUpperCase();
+  return {taxableStates,storeState};
+}
+function taxRateBps(state){
+  const st=String(state||'').toUpperCase();
+  const specific=Number(process.env['TAX_RATE_BPS_'+st]);
+  if(Number.isFinite(specific)&&specific>=0)return specific;
+  const generic=Number(process.env.SALES_TAX_RATE_BPS||600);
+  return Number.isFinite(generic)&&generic>=0?generic:0;
+}
+function calculateSalesTax({subtotalCents,shippingCents=0,state,fulfillment}){
+  const cfg=taxConfig();
+  const st=(fulfillment==='pickup'?cfg.storeState:String(state||'').toUpperCase());
+  if(!cfg.taxableStates.includes(st))return {tax_cents:0,state:st,rate_bps:0,taxable:false};
+  const rate=taxRateBps(st);
+  // Kentucky includes seller-responsible delivery charges in taxable sales price. Other states can be configured separately later.
+  const taxableBase=Math.max(0,Number(subtotalCents)||0)+Math.max(0,Number(shippingCents)||0);
+  return {tax_cents:Math.round(taxableBase*rate/10000),state:st,rate_bps:rate,taxable:true};
+}
+
+function smtpTransport(){
+  if(!process.env.SMTP_HOST||!process.env.SMTP_USER||!process.env.SMTP_PASS)return null;
+  return nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),secure:String(process.env.SMTP_SECURE||'false').toLowerCase()==='true',auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}});
+}
+async function sendOrderConfirmation(orderId){
+  const tx=smtpTransport();if(!tx)return {sent:false,reason:'SMTP not configured'};
+  const {rows}=await pool.query(`SELECT o.*,COALESCE(json_agg(json_build_object('title',oi.item_title,'quantity',oi.quantity,'line_total_cents',oi.line_total_cents)) FILTER (WHERE oi.id IS NOT NULL),'[]') AS items FROM orders o LEFT JOIN order_items oi ON oi.order_id=o.id WHERE o.id=$1 GROUP BY o.id`,[orderId]);
+  const o=rows[0];if(!o)return {sent:false,reason:'Order not found'};
+  const money=c=>'$'+(Number(c||0)/100).toFixed(2);
+  const lines=(o.items||[]).map(i=>`${i.title} x ${i.quantity} — ${money(i.line_total_cents)}`).join('\n');
+  const from=process.env.ORDER_FROM_EMAIL||process.env.SMTP_USER;
+  const text=`Thanks for your order with Pink Elephant Gun & Pawn.\n\nOrder ${o.order_number}\n${lines}\n\nSubtotal: ${money(o.subtotal_cents)}\nTax: ${money(o.tax_cents)}\nShipping: ${money(o.shipping_cents)}\nTotal: ${money(o.total_cents)}\n\nPayment status: ${o.payment_status}.`;
+  try{await tx.sendMail({from,to:o.customer_email,subject:`Pink Elephant order ${o.order_number}`,text});await pool.query('UPDATE orders SET customer_email_sent_at=now(),customer_email_error=NULL WHERE id=$1',[o.id]);return {sent:true}}
+  catch(e){await pool.query('UPDATE orders SET customer_email_error=$1 WHERE id=$2',[String(e.message||e).slice(0,1000),o.id]);return {sent:false,reason:e.message||'Email failed'}}
+}
+
 
 const roles = { viewer: 1, manager: 2, admin: 3 };
 const sign = u => jwt.sign({ sub:u.id, email:u.email, role:u.role }, process.env.JWT_SECRET, { expiresIn:'8h', issuer:'pink-elephant-api' });
@@ -115,13 +155,24 @@ app.post('/api/public/shipping-rates',checkoutLimit,async(req,res)=>{
     const r=await fetch(SHIPPO_API+'/shipments/',{method:'POST',headers:shippoHeaders(),body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(j.detail||j.message||j.error||'Shippo could not create a rate quote.');
-    const rates=(j.rates||[]).filter(x=>x.object_id&&Number.isFinite(Number(x.amount))).map(x=>({
-      rate_id:x.object_id,shipment_id:j.object_id,provider:x.provider||'',service:x.servicelevel?.name||x.servicelevel?.token||'Shipping',amount_cents:Math.round(Number(x.amount)*100),currency:x.currency||'USD',estimated_days:x.estimated_days??null,duration_terms:x.duration_terms||'',test:!!x.test
-    })).sort((a,b)=>a.amount_cents-b.amount_cents).slice(0,12);
+    let subtotalCents=0;
+    for(const requested of p.data.items){const inv=(await pool.query('SELECT price_cents,sale_price_cents FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];const unit=inv?.sale_price_cents!=null?Number(inv.sale_price_cents):Number(inv?.price_cents||0);subtotalCents+=unit*requested.quantity}
+    const rates=(j.rates||[]).filter(x=>x.object_id&&Number.isFinite(Number(x.amount))).map(x=>{
+      const amount_cents=Math.round(Number(x.amount)*100);const tax=calculateSalesTax({subtotalCents,shippingCents:amount_cents,state:p.data.shipping.state,fulfillment:'shipping'});
+      return {rate_id:x.object_id,shipment_id:j.object_id,provider:x.provider||'',service:x.servicelevel?.name||x.servicelevel?.token||'Shipping',amount_cents,currency:x.currency||'USD',estimated_days:x.estimated_days??null,duration_terms:x.duration_terms||'',test:!!x.test,tax_cents:tax.tax_cents,tax_rate_bps:tax.rate_bps,total_cents:subtotalCents+amount_cents+tax.tax_cents};
+    }).sort((a,b)=>a.amount_cents-b.amount_cents).slice(0,12);
     if(!rates.length)return res.status(502).json({error:'Shippo returned no shipping rates for this address.'});
-    res.json({rates,test_mode:rates.every(x=>x.test),parcel_note:`Package data loaded from inventory (${parcels.length} parcel${parcels.length===1?'':'s'}).`});
+    res.json({rates,test_mode:rates.every(x=>x.test),subtotal_cents:subtotalCents,parcel_note:`Package data loaded from inventory (${parcels.length} parcel${parcels.length===1?'':'s'}).`});
   }catch(e){console.error(e);res.status(e.status||502).json({error:e.message||'Could not load shipping rates.'})}
 });
+app.post('/api/public/tax-preview',checkoutLimit,async(req,res)=>{
+  const p=z.object({fulfillment:z.enum(['pickup','shipping']),shipping:z.object({state:z.string().trim().min(2).max(50)}).nullable().optional(),shipping_cents:z.number().int().min(0).default(0),items:z.array(z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive().max(99)})).min(1).max(25)}).safeParse(req.body);
+  if(!p.success)return res.status(400).json({error:'Invalid tax preview request.'});
+  try{let subtotal=0;for(const requested of p.data.items){const inv=(await pool.query('SELECT title,quantity,price_cents,sale_price_cents,regulated,public_visible FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];if(!inv||!inv.public_visible||inv.quantity<requested.quantity)return res.status(409).json({error:'An item in your cart is no longer available.'});if(inv.regulated)return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});const unit=inv.sale_price_cents!=null?Number(inv.sale_price_cents):Number(inv.price_cents);if(!Number.isFinite(unit))return res.status(400).json({error:`${inv.title} requires store pricing.`});subtotal+=unit*requested.quantity}
+    const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents:p.data.shipping_cents,state:p.data.shipping?.state,fulfillment:p.data.fulfillment});res.json({subtotal_cents:subtotal,shipping_cents:p.data.shipping_cents,tax_cents:tax.tax_cents,total_cents:subtotal+p.data.shipping_cents+tax.tax_cents,tax_state:tax.state,tax_rate_bps:tax.rate_bps,taxable:tax.taxable});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not calculate tax preview.'})}
+});
+
 async function verifyShippoRate(rateId,shipmentId){
   const r=await fetch(SHIPPO_API+'/rates/'+encodeURIComponent(rateId),{headers:shippoHeaders()});
   const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||j.message||'Could not verify the selected shipping rate.');
@@ -162,16 +213,19 @@ app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
     }
     const orderNumber='PE-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
     const shippingAddress=p.data.fulfillment==='shipping'?p.data.shipping:null;
-    const shippingCents=verifiedShipping?.cents||0; const total=subtotal+shippingCents;
-    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service) VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11,$12,$13,$14) RETURNING id,order_number,subtotal_cents,shipping_cents,total_cents,order_status,payment_status`,
-      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal,shippingCents,total,verifiedShipping?.rate_id||null,verifiedShipping?.shipment_id||null,verifiedShipping?.provider||null,verifiedShipping?.service||null])).rows[0];
+    const shippingCents=verifiedShipping?.cents||0;
+    const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents,state:p.data.shipping?.state,fulfillment:p.data.fulfillment});
+    const total=subtotal+shippingCents+tax.tax_cents;
+    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id,order_number,subtotal_cents,tax_cents,shipping_cents,total_cents,order_status,payment_status`,
+      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal,tax.tax_cents,shippingCents,total,verifiedShipping?.rate_id||null,verifiedShipping?.shipment_id||null,verifiedShipping?.provider||null,verifiedShipping?.service||null])).rows[0];
     for(const item of items){
       await c.query(`INSERT INTO order_items(order_id,inventory_id,item_title,quantity,unit_price_cents,line_total_cents) VALUES($1,$2,$3,$4,$5,$6)`,
         [order.id,item.inv.id,item.inv.title,item.quantity,item.unit,item.line]);
       await c.query('UPDATE inventory SET quantity=quantity-$1,updated_at=now() WHERE id=$2',[item.quantity,item.inv.id]);
     }
     await c.query('COMMIT');
-    res.status(201).json({order_number:order.order_number,subtotal_cents:order.subtotal_cents,total_cents:order.total_cents,status:order.order_status,payment_status:order.payment_status});
+    sendOrderConfirmation(order.id).catch(console.error);
+    res.status(201).json({order_number:order.order_number,subtotal_cents:order.subtotal_cents,tax_cents:order.tax_cents,shipping_cents:order.shipping_cents,total_cents:order.total_cents,status:order.order_status,payment_status:order.payment_status});
   }catch(e){
     try{await c.query('ROLLBACK')}catch{}
     console.error(e);res.status(e.status||500).json({error:e.status?e.message:'Could not place order. Please call the shop if the problem continues.'});
@@ -210,12 +264,43 @@ app.get('/api/orders',auth,requireRole('viewer'),async(_req,res)=>{
   res.json(rows);
 });
 app.patch('/api/orders/:id',auth,requireRole('manager'),async(req,res)=>{
-  const p=z.object({order_status:z.enum(['new','confirmed','ready','shipped','completed','cancelled']).optional(),payment_status:z.enum(['pending','paid','refunded','cancelled']).optional(),tracking_number:z.string().max(180).nullable().optional(),admin_notes:z.string().max(3000).optional()}).safeParse(req.body);
+  const p=z.object({order_status:z.enum(['new','confirmed','ready','shipped','completed','cancelled']).optional(),payment_status:z.enum(['pending','paid','refunded','cancelled']).optional(),tracking_number:z.string().max(180).nullable().optional(),admin_notes:z.string().max(3000).optional(),paid_at:z.coerce.date().optional(),shipped_at:z.coerce.date().optional(),completed_at:z.coerce.date().optional(),cancelled_at:z.coerce.date().optional()}).safeParse(req.body);
   if(!p.success)return res.status(400).json({error:p.error.issues});const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});
   const c=await pool.connect();try{await c.query('BEGIN');const current=(await c.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE',[req.params.id])).rows[0];if(!current){await c.query('ROLLBACK');return res.status(404).json({error:'Order not found'})}
     if(p.data.order_status==='cancelled'&&!current.inventory_restocked){const {rows:items}=await c.query('SELECT inventory_id,quantity FROM order_items WHERE order_id=$1',[current.id]);for(const i of items)if(i.inventory_id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[i.quantity,i.inventory_id]);p.data.inventory_restocked=true}
+    if(p.data.payment_status==='paid'&&!current.paid_at)p.data.paid_at=new Date();
+    if(p.data.order_status==='shipped'&&!current.shipped_at)p.data.shipped_at=new Date();
+    if(p.data.order_status==='completed'&&!current.completed_at)p.data.completed_at=new Date();
+    if(p.data.order_status==='cancelled'&&!current.cancelled_at)p.data.cancelled_at=new Date();
     const k2=Object.keys(p.data);const vals=[];const sets=[];k2.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.params.id);const {rows}=await c.query(`UPDATE orders SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals);await c.query('COMMIT');await audit(req,'UPDATE','order',rows[0].id,{fields:k2});res.json(rows[0]);
   }catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e);res.status(500).json({error:'Could not update order'})}finally{c.release()}
+});
+
+
+app.post('/api/orders/:id/send-confirmation',auth,requireRole('manager'),async(req,res)=>{
+  try{const result=await sendOrderConfirmation(req.params.id);if(!result.sent)return res.status(503).json({error:result.reason});res.json(result)}catch(e){console.error(e);res.status(500).json({error:'Could not send confirmation email'})}
+});
+
+app.post('/api/orders/:id/label',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const {rows}=await pool.query('SELECT * FROM orders WHERE id=$1',[req.params.id]);const o=rows[0];if(!o)return res.status(404).json({error:'Order not found'});
+    if(o.fulfillment!=='shipping')return res.status(400).json({error:'Pickup orders do not need a shipping label.'});
+    if(o.shipping_label_url)return res.json({label_url:o.shipping_label_url,tracking_number:o.tracking_number,tracking_url:o.tracking_url,test:o.shipping_label_test,existing:true});
+    if(!o.shippo_rate_id)return res.status(400).json({error:'This order does not have a Shippo rate. Recreate the order shipping quote first.'});
+    const token=process.env.SHIPPO_API_TOKEN||'';if(token.startsWith('shippo_live_')&&String(process.env.ALLOW_LIVE_LABEL_PURCHASE||'false').toLowerCase()!=='true')return res.status(403).json({error:'Live label purchase is locked. Set ALLOW_LIVE_LABEL_PURCHASE=true only when you are ready to buy real postage.'});
+    const r=await fetch(SHIPPO_API+'/transactions',{method:'POST',headers:shippoHeaders(),body:JSON.stringify({rate:o.shippo_rate_id,async:false,label_file_type:'PDF_4x6',metadata:o.order_number.slice(0,100)})});
+    const j=await r.json().catch(()=>({}));if(!r.ok||j.status==='ERROR')return res.status(502).json({error:j.messages?.map(x=>x.text).filter(Boolean).join('; ')||j.detail||j.message||'Shippo could not create the label.'});
+    const {rows:updated}=await pool.query(`UPDATE orders SET shippo_transaction_id=$1,shipping_label_url=$2,tracking_number=COALESCE($3,tracking_number),tracking_url=$4,shipping_label_test=$5,label_created_at=now(),updated_at=now() WHERE id=$6 RETURNING *`,[j.object_id||null,j.label_url||null,j.tracking_number||null,j.tracking_url_provider||null,!!j.test,o.id]);
+    await audit(req,'CREATE','shipping_label',o.id,{shippo_transaction_id:j.object_id,test:!!j.test});
+    res.status(201).json({label_url:j.label_url,tracking_number:j.tracking_number,tracking_url:j.tracking_url_provider,test:!!j.test,transaction_id:j.object_id,order:updated[0]});
+  }catch(e){console.error(e);res.status(500).json({error:e.message||'Could not create shipping label'})}
+});
+
+app.post('/api/orders/:id/refund-label',auth,requireRole('manager'),async(req,res)=>{
+  try{const o=(await pool.query('SELECT * FROM orders WHERE id=$1',[req.params.id])).rows[0];if(!o)return res.status(404).json({error:'Order not found'});if(!o.shippo_transaction_id)return res.status(400).json({error:'No Shippo label exists for this order.'});
+    const r=await fetch(SHIPPO_API+'/refunds',{method:'POST',headers:shippoHeaders(),body:JSON.stringify({transaction:o.shippo_transaction_id,async:false})});const j=await r.json().catch(()=>({}));if(!r.ok)return res.status(502).json({error:j.detail||j.message||'Shippo could not request the label refund.'});
+    await pool.query('UPDATE orders SET shippo_refund_id=$1,shippo_refund_status=$2,updated_at=now() WHERE id=$3',[j.object_id||null,j.status||'PENDING',o.id]);await audit(req,'REFUND','shipping_label',o.id,{refund_id:j.object_id,status:j.status});res.json(j);
+  }catch(e){console.error(e);res.status(500).json({error:e.message||'Could not refund shipping label'})}
 });
 
 
