@@ -256,3 +256,24 @@ ALTER TABLE customers ADD COLUMN IF NOT EXISTS bravo_link_status text NOT NULL D
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS bravo_last_synced_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS idx_orders_admin_hidden ON orders(admin_hidden);
+
+
+-- MAKE OFFER WORKFLOW
+CREATE TABLE IF NOT EXISTS offers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  inventory_id uuid REFERENCES inventory(id) ON DELETE SET NULL,
+  item_title text NOT NULL,
+  asking_price_cents integer,
+  offer_cents integer NOT NULL CHECK (offer_cents >= 0),
+  customer_name text NOT NULL,
+  customer_email text NOT NULL,
+  customer_phone text,
+  customer_message text NOT NULL DEFAULT '',
+  status text NOT NULL DEFAULT 'new' CHECK (status IN ('new','contacted','accepted','countered','declined','expired')),
+  counter_cents integer,
+  admin_notes text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS offers_created_idx ON offers(created_at DESC);
+CREATE INDEX IF NOT EXISTS offers_status_idx ON offers(status,created_at DESC);
