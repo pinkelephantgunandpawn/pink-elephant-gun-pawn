@@ -212,3 +212,17 @@ ALTER TABLE inventory ADD COLUMN IF NOT EXISTS shipping_weight_lb numeric(10,3);
 ALTER TABLE inventory ADD COLUMN IF NOT EXISTS shipping_length_in numeric(10,2);
 ALTER TABLE inventory ADD COLUMN IF NOT EXISTS shipping_width_in numeric(10,2);
 ALTER TABLE inventory ADD COLUMN IF NOT EXISTS shipping_height_in numeric(10,2);
+
+
+-- PRE-MERCHANT LAUNCH READINESS: TAX / LABEL / EMAIL / FULFILLMENT
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tracking_url text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_label_test boolean;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS label_created_at timestamptz;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shippo_refund_id text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shippo_refund_status text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_email_sent_at timestamptz;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_email_error text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at timestamptz;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipped_at timestamptz;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at timestamptz;
