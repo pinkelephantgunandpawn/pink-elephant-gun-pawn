@@ -131,7 +131,8 @@ function shipFromAddress(){return {
   state:process.env.SHIP_FROM_STATE||'KY',
   zip:process.env.SHIP_FROM_ZIP||'41653',
   country:'US',
-  phone:process.env.SHIP_FROM_PHONE||'6065065030'
+  phone:process.env.SHIP_FROM_PHONE||'6065065030',
+  email:process.env.SHIP_FROM_EMAIL||''
 }}
 const shippingQuoteSchema=z.object({
   customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40)}),
