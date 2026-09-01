@@ -154,7 +154,7 @@ async function loadShippingRates(){
   btn.disabled=true;btn.textContent='LOADING RATES...';selectedShippingRate=null;renderCheckoutSummary();
   try{
     const payload={customer:{name:f.get('name'),email:f.get('email'),phone:f.get('phone')},shipping:{address1:f.get('address1'),city:f.get('city'),state:f.get('state'),postal:f.get('postal')},items:cart.map(i=>({inventory_id:i.id,quantity:i.qty}))};
-    const r=await fetch(API+'/api/public/shipping-rates',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Could not load shipping rates');
+    const r=await fetch(API+'/api/public/shipping-rates',{method:'POST',headers:{'Content-Type':'application/json',...(localStorage.getItem('pe_customer_token')?{Authorization:'Bearer '+localStorage.getItem('pe_customer_token')}:{})},body:JSON.stringify(payload)}),j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Could not load shipping rates');
     box.className='shippingRates show';box.innerHTML=`<b>Choose shipping</b><div class="smallNote">${esc(j.parcel_note||'Test shipping quote')} — test rates only until package weights/dimensions are added to inventory.</div>`+j.rates.map((x,i)=>`<label class="shippingRate"><input type="radio" name="shipping_rate_choice" value="${i}" onchange="chooseShippingRate(${i})"><div class="rateInfo"><b>${esc(x.provider)} — ${esc(x.service)}</b><div class="smallNote">${x.estimated_days?esc(String(x.estimated_days))+' estimated day(s)':''}${x.duration_terms?' • '+esc(x.duration_terms):''}</div></div><div class="ratePrice">${money(x.amount_cents)}</div></label>`).join('');window._shipRates=j.rates;
   }catch(err){box.className='shippingRates show';box.innerHTML=`<div class="checkoutMsg show bad">${esc(err.message||'Could not load shipping rates')}</div>`}finally{btn.disabled=false;btn.textContent='GET SHIPPING RATES'}
 }
@@ -213,4 +213,62 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeProduct();clos
 renderCart();
 fetch(API+'/api/public/inventory').then(r=>r.ok?r.json():Promise.reject()).then(x=>{data=x;render();cart=cart.map(c=>{const x=data.find(i=>i.id===c.id);return x?{...c,title:x.title,price_cents:effectivePrice(x),max:Number(x.quantity)||0}:c}).filter(c=>c.max>0&&c.price_cents!=null);saveCart()}).catch(()=>{document.getElementById('statItems').textContent='0';grid.innerHTML='<div class="none">Inventory is temporarily unavailable. Please call the shop for current availability.</div>';});
 
-</script></body></html>
+</script>
+<style>
+.peAcctBtn{position:fixed;right:18px;bottom:18px;z-index:80;background:#e86aa7;color:#16070f;border:0;border-radius:999px;padding:12px 16px;font-weight:900;cursor:pointer}
+.peAcctBack{display:none;position:fixed;inset:0;background:#000b;z-index:100;align-items:center;justify-content:center;padding:18px}
+.peAcctBack.open{display:flex}.peAcctBox{width:min(620px,100%);max-height:90vh;overflow:auto;background:#15151a;border:1px solid #303038;border-radius:16px;padding:20px;color:#fff}
+.peAcctTabs{display:flex;gap:8px;margin-bottom:12px}.peAcctTabs button{flex:1;padding:10px;border-radius:9px;border:1px solid #444;background:#222;color:#fff;font-weight:900;cursor:pointer}.peAcctTabs button.active{background:#e86aa7;color:#16070f}
+.peAcctBox input{width:100%;padding:11px;margin:6px 0;background:#09090b;color:#fff;border:1px solid #38383f;border-radius:8px}.peAcctBox .btn{margin-top:8px}.peOrderMini{border:1px solid #333;border-radius:10px;padding:10px;margin:8px 0}.peClose{float:right;background:none;border:0;color:#fff;font-size:24px;cursor:pointer}
+</style>
+<button class="peAcctBtn" onclick="peOpenAccount()">ACCOUNT</button>
+<div class="peAcctBack" id="peAcctBack" onclick="if(event.target===this)peCloseAccount()">
+  <div class="peAcctBox">
+    <button class="peClose" onclick="peCloseAccount()">×</button>
+    <h2>Pink Elephant Account</h2>
+    <div id="peLoggedOut">
+      <div class="peAcctTabs"><button id="peLoginTab" class="active" onclick="peAcctMode('login')">SIGN IN</button><button id="peRegisterTab" onclick="peAcctMode('register')">CREATE ACCOUNT</button></div>
+      <form id="peAcctForm">
+        <div id="peRegFields" style="display:none"><input name="name" placeholder="Full name"><input name="phone" placeholder="Phone"></div>
+        <input name="email" type="email" placeholder="Email" required>
+        <input name="password" type="password" placeholder="Password" required minlength="8">
+        <button class="btn primary" type="submit" id="peAcctSubmit">SIGN IN</button>
+      </form>
+      <div id="peAcctMsg" class="smallNote" style="margin-top:8px"></div>
+    </div>
+    <div id="peLoggedIn" style="display:none">
+      <div id="peProfile"></div>
+      <h3>Your Orders</h3><div id="peOrders"></div>
+      <button class="btn" onclick="peLogout()">SIGN OUT</button>
+    </div>
+  </div>
+</div>
+<script>
+let peAcctModeNow='login';
+const peToken=()=>localStorage.getItem('pe_customer_token')||'';
+function peAcctMode(m){peAcctModeNow=m;document.getElementById('peRegFields').style.display=m==='register'?'block':'none';document.getElementById('peLoginTab').classList.toggle('active',m==='login');document.getElementById('peRegisterTab').classList.toggle('active',m==='register');document.getElementById('peAcctSubmit').textContent=m==='register'?'CREATE ACCOUNT':'SIGN IN';}
+function peOpenAccount(){document.getElementById('peAcctBack').classList.add('open');peLoadAccount()}
+function peCloseAccount(){document.getElementById('peAcctBack').classList.remove('open')}
+async function peLoadAccount(){
+  const t=peToken();
+  document.getElementById('peLoggedOut').style.display=t?'none':'block';document.getElementById('peLoggedIn').style.display=t?'block':'none';
+  if(!t)return;
+  try{
+    const [mr,or]=await Promise.all([fetch(API+'/api/customer/me',{headers:{Authorization:'Bearer '+t}}),fetch(API+'/api/customer/orders',{headers:{Authorization:'Bearer '+t}})]);
+    if(!mr.ok)throw new Error('Session expired');
+    const me=await mr.json(),orders=or.ok?await or.json():[];
+    document.getElementById('peProfile').innerHTML=`<b>${esc(me.name||me.email)}</b><br><span class="smallNote">${esc(me.email)}${me.phone?' • '+esc(me.phone):''}</span>`;
+    document.getElementById('peOrders').innerHTML=orders.length?orders.map(o=>`<div class="peOrderMini"><b>Order #${esc(o.order_number)}</b><br><span class="smallNote">${esc(o.order_status||'new')} • ${esc(o.fulfillment||'')}</span><br><b>${money(Number(o.total_cents||0))}</b>${o.tracking_number?`<br>Tracking: ${esc(o.tracking_number)}`:''}</div>`).join(''):'<div class="smallNote">No orders yet.</div>';
+  }catch(e){peLogout();document.getElementById('peAcctMsg').textContent=e.message}
+}
+document.getElementById('peAcctForm').addEventListener('submit',async e=>{
+  e.preventDefault();const f=new FormData(e.currentTarget);const payload={email:f.get('email'),password:f.get('password'),name:f.get('name'),phone:f.get('phone')};
+  const path=peAcctModeNow==='register'?'/api/public/customer/register':'/api/public/customer/login';
+  const r=await fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const j=await r.json().catch(()=>({}));
+  if(!r.ok){document.getElementById('peAcctMsg').textContent=j.error||'Could not continue';return}
+  localStorage.setItem('pe_customer_token',j.token);e.currentTarget.reset();peLoadAccount();
+});
+function peLogout(){localStorage.removeItem('pe_customer_token');document.getElementById('peLoggedOut').style.display='block';document.getElementById('peLoggedIn').style.display='none'}
+</script>
+
+</body></html>
