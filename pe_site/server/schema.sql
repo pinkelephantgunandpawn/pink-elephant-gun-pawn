@@ -226,3 +226,18 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at timestamptz;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipped_at timestamptz;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS completed_at timestamptz;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at timestamptz;
+
+
+-- Customer portal accounts
+CREATE TABLE IF NOT EXISTS customers (
+  id bigserial PRIMARY KEY,
+  email text UNIQUE NOT NULL,
+  password_hash text NOT NULL,
+  name text,
+  phone text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_id bigint REFERENCES customers(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
