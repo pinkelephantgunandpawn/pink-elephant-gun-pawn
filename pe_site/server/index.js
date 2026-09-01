@@ -131,8 +131,30 @@ function shipFromAddress(){return {
   state:process.env.SHIP_FROM_STATE||'KY',
   zip:process.env.SHIP_FROM_ZIP||'41653',
   country:'US',
-  phone:process.env.SHIP_FROM_PHONE||'6065065030'
+  phone:process.env.SHIP_FROM_PHONE||'6065065030',
+  email:process.env.SHIP_FROM_EMAIL||''
 }}
+const SHIPPING_ESTIMATE_BUFFER_CENTS=Math.max(0,Number.parseInt(process.env.SHIPPING_ESTIMATE_BUFFER_CENTS||'400',10)||0);
+const SHIPPING_DEFAULTS={
+  small:{weight:1,length:10,width:8,height:4},
+  medium:{weight:4,length:16,width:12,height:8},
+  large:{weight:10,length:22,width:18,height:14},
+  guitar:{weight:18,length:48,width:20,height:8},
+  console:{weight:12,length:18,width:14,height:8}
+};
+function estimatedParcelForInventory(inv){
+  const saved=[inv.shipping_weight_lb,inv.shipping_length_in,inv.shipping_width_in,inv.shipping_height_in].map(Number);
+  if(saved.every(v=>Number.isFinite(v)&&v>0))return {weight:saved[0],length:saved[1],width:saved[2],height:saved[3],estimated:false,profile:'saved'};
+  const cat=String(inv.category||'').toLowerCase();
+  let key='medium';
+  if(/jewel|collect|accessor|coin|card/.test(cat))key='small';
+  else if(/gaming|console|electronic/.test(cat))key='console';
+  else if(/music|guitar|instrument/.test(cat))key='guitar';
+  else if(/tool|large|sport/.test(cat))key='large';
+  const p={...SHIPPING_DEFAULTS[key]};
+  if(Number.isFinite(saved[0])&&saved[0]>0)p.weight=saved[0];
+  return {...p,estimated:true,profile:key};
+}
 const shippingQuoteSchema=z.object({
   customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40)}),
   shipping:z.object({address1:z.string().trim().min(3).max(180),city:z.string().trim().min(2).max(100),state:z.string().trim().min(2).max(50),postal:z.string().trim().min(3).max(20)}),
@@ -144,25 +166,25 @@ app.post('/api/public/shipping-rates',checkoutLimit,async(req,res)=>{
     // Confirm cart availability and build parcels from each inventory item's saved package data.
     const parcels=[];
     for(const requested of p.data.items){
-      const inv=(await pool.query('SELECT id,title,quantity,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];
+      const inv=(await pool.query('SELECT id,title,category,quantity,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];
       if(!inv||!inv.public_visible||inv.quantity<requested.quantity)return res.status(409).json({error:'An item in your cart is no longer available.'});
       if(inv.regulated)return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});
-      const dims=[inv.shipping_weight_lb,inv.shipping_length_in,inv.shipping_width_in,inv.shipping_height_in].map(Number);
-      if(dims.some(v=>!Number.isFinite(v)||v<=0))return res.status(400).json({error:`Shipping size/weight is not set for ${inv.title}. Please call the shop for shipping.`});
-      for(let n=0;n<requested.quantity;n++)parcels.push({length:String(inv.shipping_length_in),width:String(inv.shipping_width_in),height:String(inv.shipping_height_in),distance_unit:'in',weight:String(inv.shipping_weight_lb),mass_unit:'lb'});
+      const parcel=estimatedParcelForInventory(inv);
+      for(let n=0;n<requested.quantity;n++)parcels.push({length:String(parcel.length),width:String(parcel.width),height:String(parcel.height),distance_unit:'in',weight:String(parcel.weight),mass_unit:'lb',_estimated:parcel.estimated,_profile:parcel.profile});
     }
-    const body={address_from:shipFromAddress(),address_to:{name:p.data.customer.name,street1:p.data.shipping.address1,city:p.data.shipping.city,state:p.data.shipping.state.toUpperCase(),zip:p.data.shipping.postal,country:'US',phone:p.data.customer.phone,email:p.data.customer.email},parcels,async:false};
+    const shippoParcels=parcels.map(({_estimated,_profile,...p})=>p);
+    const body={address_from:shipFromAddress(),address_to:{name:p.data.customer.name,street1:p.data.shipping.address1,city:p.data.shipping.city,state:p.data.shipping.state.toUpperCase(),zip:p.data.shipping.postal,country:'US',phone:p.data.customer.phone,email:p.data.customer.email},parcels:shippoParcels,async:false};
     const r=await fetch(SHIPPO_API+'/shipments/',{method:'POST',headers:shippoHeaders(),body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(j.detail||j.message||j.error||'Shippo could not create a rate quote.');
     let subtotalCents=0;
     for(const requested of p.data.items){const inv=(await pool.query('SELECT price_cents,sale_price_cents FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];const unit=inv?.sale_price_cents!=null?Number(inv.sale_price_cents):Number(inv?.price_cents||0);subtotalCents+=unit*requested.quantity}
     const rates=(j.rates||[]).filter(x=>x.object_id&&Number.isFinite(Number(x.amount))).map(x=>{
-      const amount_cents=Math.round(Number(x.amount)*100);const tax=calculateSalesTax({subtotalCents,shippingCents:amount_cents,state:p.data.shipping.state,fulfillment:'shipping'});
-      return {rate_id:x.object_id,shipment_id:j.object_id,provider:x.provider||'',service:x.servicelevel?.name||x.servicelevel?.token||'Shipping',amount_cents,currency:x.currency||'USD',estimated_days:x.estimated_days??null,duration_terms:x.duration_terms||'',test:!!x.test,tax_cents:tax.tax_cents,tax_rate_bps:tax.rate_bps,total_cents:subtotalCents+amount_cents+tax.tax_cents};
+      const carrier_amount_cents=Math.round(Number(x.amount)*100);const amount_cents=carrier_amount_cents+SHIPPING_ESTIMATE_BUFFER_CENTS;const tax=calculateSalesTax({subtotalCents,shippingCents:amount_cents,state:p.data.shipping.state,fulfillment:'shipping'});
+      return {rate_id:x.object_id,shipment_id:j.object_id,provider:x.provider||'',service:x.servicelevel?.name||x.servicelevel?.token||'Shipping',amount_cents,carrier_amount_cents,estimate_buffer_cents:SHIPPING_ESTIMATE_BUFFER_CENTS,currency:x.currency||'USD',estimated_days:x.estimated_days??null,duration_terms:x.duration_terms||'',test:!!x.test,tax_cents:tax.tax_cents,tax_rate_bps:tax.rate_bps,total_cents:subtotalCents+amount_cents+tax.tax_cents,estimated_shipping:true};
     }).sort((a,b)=>a.amount_cents-b.amount_cents).slice(0,12);
     if(!rates.length)return res.status(502).json({error:'Shippo returned no shipping rates for this address.'});
-    res.json({rates,test_mode:rates.every(x=>x.test),subtotal_cents:subtotalCents,parcel_note:`Package data loaded from inventory (${parcels.length} parcel${parcels.length===1?'':'s'}).`});
+    res.json({rates,test_mode:rates.every(x=>x.test),subtotal_cents:subtotalCents,parcel_note:`Estimated shipping uses saved package data when available and safe category presets otherwise. A ${'$'}${(SHIPPING_ESTIMATE_BUFFER_CENTS/100).toFixed(2)} packing/estimate buffer is included.`});
   }catch(e){console.error(e);res.status(e.status||502).json({error:e.message||'Could not load shipping rates.'})}
 });
 app.post('/api/public/tax-preview',checkoutLimit,async(req,res)=>{
@@ -177,7 +199,7 @@ async function verifyShippoRate(rateId,shipmentId){
   const r=await fetch(SHIPPO_API+'/rates/'+encodeURIComponent(rateId),{headers:shippoHeaders()});
   const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||j.message||'Could not verify the selected shipping rate.');
   if(shipmentId&&j.shipment!==shipmentId)throw new Error('The selected shipping rate does not match this quote.');
-  const cents=Math.round(Number(j.amount)*100);if(!Number.isFinite(cents)||cents<0)throw new Error('The selected shipping rate is invalid.');
+  const carrierCents=Math.round(Number(j.amount)*100);const cents=carrierCents+SHIPPING_ESTIMATE_BUFFER_CENTS;if(!Number.isFinite(cents)||cents<0)throw new Error('The selected shipping rate is invalid.');
   return {cents,provider:j.provider||'',service:j.servicelevel?.name||j.servicelevel?.token||'Shipping',rate_id:j.object_id,shipment_id:j.shipment||shipmentId||null,test:!!j.test};
 }
 
@@ -357,12 +379,45 @@ app.post('/api/inventory',auth,requireRole('manager'),async (req,res)=>{
   const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,[x.title,x.category,x.quantity,x.cost_cents,x.price_cents??null,x.price_label??null,x.sku||null,x.item_type,x.low_stock,x.description,x.image_url??(x.image_urls?.[0]||null),JSON.stringify(x.image_urls||[]),x.condition,x.sale_price_cents??null,x.featured,x.regulated,x.public_visible,x.shipping_weight_lb??null,x.shipping_length_in??null,x.shipping_width_in??null,x.shipping_height_in??null]);
   await audit(req,'CREATE','inventory',rows[0].id,{title:x.title,regulated:x.regulated}); res.status(201).json(rows[0]);
 });
+app.post('/api/inventory/:id/duplicate',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in)
+      SELECT title || ' COPY',category,quantity,cost_cents,price_cents,price_label,NULL,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,false,regulated,false,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in
+      FROM inventory WHERE id=$1 RETURNING *`,[req.params.id]);
+    if(!rows[0])return res.status(404).json({error:'Inventory item not found'});
+    await audit(req,'DUPLICATE','inventory',rows[0].id,{source_id:req.params.id,title:rows[0].title});
+    res.status(201).json(rows[0]);
+  }catch(e){console.error(e);res.status(500).json({error:'Could not duplicate inventory item'})}
+});
 app.patch('/api/inventory/:id',auth,requireRole('manager'),async (req,res)=>{
   const p=inventorySchema.partial().safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const keys=Object.keys(p.data); if(!keys.length)return res.status(400).json({error:'No changes'});
   const map={price_cents:'price_cents',price_label:'price_label',title:'title',category:'category',quantity:'quantity',cost_cents:'cost_cents',sku:'sku',item_type:'item_type',low_stock:'low_stock',description:'description',image_url:'image_url',image_urls:'image_urls',condition:'condition',sale_price_cents:'sale_price_cents',featured:'featured',regulated:'regulated',public_visible:'public_visible',shipping_weight_lb:'shipping_weight_lb',shipping_length_in:'shipping_length_in',shipping_width_in:'shipping_width_in',shipping_height_in:'shipping_height_in'};
   const vals=[]; const sets=[]; keys.forEach((k,i)=>{sets.push(`${map[k]}=$${i+1}`); vals.push(k==='image_urls'?JSON.stringify(p.data[k]||[]):(p.data[k]??null))}); vals.push(req.params.id);
   const {rows}=await pool.query(`UPDATE inventory SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals); if(!rows[0])return res.status(404).json({error:'Inventory item not found'});
   await audit(req,'UPDATE','inventory',rows[0].id,{fields:keys}); res.json(rows[0]);
+});
+const publicOfferSchema=z.object({
+  inventory_id:z.string().uuid(),
+  customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().max(40).optional().default('')}),
+  offer_cents:z.number().int().min(100),
+  message:z.string().trim().max(1000).optional().default('')
+});
+app.post('/api/public/offers',checkoutLimit,async(req,res)=>{
+  const p=publicOfferSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Enter your name, email and a valid offer.'});
+  try{
+    const inv=(await pool.query('SELECT id,title,quantity,price_cents,sale_price_cents,public_visible FROM inventory WHERE id=$1',[p.data.inventory_id])).rows[0];
+    if(!inv||!inv.public_visible||Number(inv.quantity)<=0)return res.status(409).json({error:'This item is no longer available.'});
+    const asking=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);
+    const {rows}=await pool.query(`INSERT INTO offers(inventory_id,item_title,asking_price_cents,offer_cents,customer_name,customer_email,customer_phone,customer_message) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,status,created_at`,[inv.id,inv.title,asking,p.data.offer_cents,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone||null,p.data.message||'']);
+    res.status(201).json({ok:true,offer_id:rows[0].id,status:rows[0].status});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not submit offer'})}
+});
+app.get('/api/offers',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query('SELECT * FROM offers ORDER BY created_at DESC LIMIT 1000');res.json(rows)});
+app.patch('/api/offers/:id',auth,requireRole('manager'),async(req,res)=>{
+  const p=z.object({status:z.enum(['new','contacted','accepted','countered','declined','expired']).optional(),counter_cents:z.number().int().min(0).nullable().optional(),admin_notes:z.string().max(3000).optional()}).safeParse(req.body);
+  if(!p.success)return res.status(400).json({error:'Invalid offer update'});const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});
+  const vals=[],sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.params.id);
+  const {rows}=await pool.query(`UPDATE offers SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:'Offer not found'});await audit(req,'UPDATE','offer',rows[0].id,{fields:keys});res.json(rows[0]);
 });
 app.post('/api/sales',auth,requireRole('manager'),async(req,res)=>{
   const p=z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive(),gross_cents:z.number().int().min(0),tax_cents:z.number().int().min(0),payment_method:z.string().min(1).max(80),order_ref:z.string().max(120).nullable().optional()}).safeParse(req.body);
