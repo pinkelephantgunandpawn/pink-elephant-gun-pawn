@@ -241,3 +241,18 @@ CREATE TABLE IF NOT EXISTS customers (
 
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_id bigint REFERENCES customers(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
+
+
+-- QoL / customer portal / admin archive additions
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS admin_hidden boolean NOT NULL DEFAULT false;
+
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS address1 text;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS address2 text;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS city text;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS state text;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS postal text;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS bravo_customer_id text;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS bravo_link_status text NOT NULL DEFAULT 'not_connected';
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS bravo_last_synced_at timestamptz;
+
+CREATE INDEX IF NOT EXISTS idx_orders_admin_hidden ON orders(admin_hidden);
