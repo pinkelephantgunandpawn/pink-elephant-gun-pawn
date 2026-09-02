@@ -11,7 +11,6 @@ import nodemailer from 'nodemailer';
 import multer from 'multer';
 import * as XLSX from 'xlsx';
 import csvParser from 'csv-parser';
-import ExcelJS from 'exceljs';
 import os from 'node:os';
 import zipcodes from 'zipcodes';
 import fs from 'node:fs/promises';
