@@ -10,6 +10,8 @@ import { z } from 'zod';
 import nodemailer from 'nodemailer';
 import multer from 'multer';
 import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
+import os from 'node:os';
 import zipcodes from 'zipcodes';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -552,7 +554,13 @@ app.patch('/api/state-law-profiles/:state',auth,requireRole('manager'),async(req
 });
 
 
-const atfUpload=multer({storage:multer.memoryStorage(),limits:{fileSize:25*1024*1024}});
+const atfUpload=multer({
+  storage:multer.diskStorage({
+    destination:(_req,_file,cb)=>cb(null,os.tmpdir()),
+    filename:(_req,file,cb)=>cb(null,`pink-elephant-atf-${Date.now()}-${String(file.originalname||'ffl').replace(/[^a-zA-Z0-9._-]/g,'_')}`)
+  }),
+  limits:{fileSize:100*1024*1024}
+});
 function firstField(row,names){for(const n of names){if(row[n]!==undefined&&row[n]!==null&&String(row[n]).trim()!=='')return String(row[n]).trim()}return ''}
 function atfDealerFromRow(row){
   const norm={};for(const [k,v] of Object.entries(row||{}))norm[String(k).trim().toUpperCase().replace(/[^A-Z0-9]+/g,'_')]=v;
@@ -568,20 +576,49 @@ function atfDealerFromRow(row){
   const lic=firstField(norm,['FFL_NUMBER','LICENSE_NUMBER','LIC_NUMBER','LIC_NO']);
   return {name,address1,city,state,postal:zip5,license_type:type||null,source_license_number:lic||null,latitude:Number.isFinite(z.latitude)?z.latitude:null,longitude:Number.isFinite(z.longitude)?z.longitude:null};
 }
-app.post('/api/ffl-dealers/import-atf',auth,requireRole('manager'),atfUpload.single('file'),async(req,res)=>{
-  if(!req.file)return res.status(400).json({error:'Choose an ATF .xlsx, .xls, .csv, or .txt file first.'});
+async function upsertAtfBatch(batch){
+  let added=0,updated=0;
+  const client=await pool.connect();
   try{
-    const wb=XLSX.read(req.file.buffer,{type:'buffer'}),ws=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(ws,{defval:''});
-    const parsed=raw.map(atfDealerFromRow).filter(Boolean);if(!parsed.length)return res.status(400).json({error:'No usable FFL dealer rows were found. Use the official ATF FFL listing file.'});
-    let added=0,updated=0;
-    for(const d of parsed){
-      const r=await pool.query(`INSERT INTO ffl_dealers(name,address1,city,state,postal,active,latitude,longitude,source,source_license_number,license_type,source_updated_at)
+    await client.query('BEGIN');
+    for(const d of batch){
+      const r=await client.query(`INSERT INTO ffl_dealers(name,address1,city,state,postal,active,latitude,longitude,source,source_license_number,license_type,source_updated_at)
         VALUES($1,$2,$3,$4,$5,true,$6,$7,'ATF',$8,$9,now())
         ON CONFLICT (source,name,address1,city,state,postal) DO UPDATE SET latitude=COALESCE(EXCLUDED.latitude,ffl_dealers.latitude),longitude=COALESCE(EXCLUDED.longitude,ffl_dealers.longitude),source_license_number=COALESCE(EXCLUDED.source_license_number,ffl_dealers.source_license_number),license_type=COALESCE(EXCLUDED.license_type,ffl_dealers.license_type),active=true,source_updated_at=now(),updated_at=now() RETURNING (xmax = 0) AS inserted`,[d.name,d.address1,d.city,d.state,d.postal,d.latitude,d.longitude,d.source_license_number,d.license_type]);
       if(r.rows[0]?.inserted)added++;else updated++;
     }
-    await audit(req,'IMPORT','ffl_dealers',null,{source:'ATF',rows:parsed.length,added,updated,file:req.file.originalname});res.json({ok:true,rows:parsed.length,added,updated});
-  }catch(e){console.error('ATF FFL import error',e);res.status(500).json({error:'Could not import the ATF dealer file.'})}
+    await client.query('COMMIT');return {added,updated};
+  }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
+}
+async function importAtfXlsxStream(filePath){
+  const reader=new ExcelJS.stream.xlsx.WorkbookReader(filePath,{entries:'emit',sharedStrings:'cache',styles:'ignore',worksheets:'emit',hyperlinks:'ignore'});
+  let headers=null,batch=[],rows=0,added=0,updated=0,seenSheet=false;
+  for await(const worksheet of reader){
+    if(seenSheet)break;seenSheet=true;
+    for await(const row of worksheet){
+      const vals=Array.isArray(row.values)?row.values.slice(1):[];
+      if(!headers){headers=vals.map(v=>String(v??'').trim());continue}
+      const obj={};headers.forEach((h,i)=>{if(h)obj[h]=vals[i]??''});
+      const d=atfDealerFromRow(obj);if(!d)continue;
+      batch.push(d);rows++;
+      if(batch.length>=250){const r=await upsertAtfBatch(batch);added+=r.added;updated+=r.updated;batch=[]}
+    }
+  }
+  if(batch.length){const r=await upsertAtfBatch(batch);added+=r.added;updated+=r.updated}
+  return {rows,added,updated};
+}
+app.post('/api/ffl-dealers/import-atf',auth,requireRole('manager'),atfUpload.single('file'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'Choose an official ATF .xlsx file first.'});
+  const filePath=req.file.path;
+  try{
+    const ext=path.extname(req.file.originalname||'').toLowerCase();
+    if(ext!=='.xlsx')return res.status(400).json({error:'For the national ATF directory, upload the official .xlsx file. This streaming importer avoids server memory crashes.'});
+    const result=await importAtfXlsxStream(filePath);
+    if(!result.rows)return res.status(400).json({error:'No usable FFL dealer rows were found. Use the official ATF complete FFL .xlsx listing.'});
+    await audit(req,'IMPORT','ffl_dealers',null,{source:'ATF',...result,file:req.file.originalname});
+    res.json({ok:true,...result});
+  }catch(e){console.error('ATF FFL streaming import error',e);res.status(500).json({error:'Could not import the ATF dealer file. Check Render logs for ATF FFL streaming import error.'})}
+  finally{if(filePath)fs.unlink(filePath).catch(()=>{})}
 });
 app.get('/api/ffl-dealers/import-status',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query(`SELECT count(*)::int AS total,max(source_updated_at) AS last_import FROM ffl_dealers WHERE source='ATF'`);res.json(rows[0])});
 
