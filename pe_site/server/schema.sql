@@ -295,6 +295,8 @@ ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_status text NOT NUL
 ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_notes text NOT NULL DEFAULT '';
 ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_reviewed_at timestamptz;
 ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_reviewed_by uuid REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS receiving_ffl_number text;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS receiving_ffl_license_type text;
 
 CREATE TABLE IF NOT EXISTS state_law_profiles (
   state_code text PRIMARY KEY,
