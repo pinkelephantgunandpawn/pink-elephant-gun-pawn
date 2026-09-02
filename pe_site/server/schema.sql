@@ -277,3 +277,43 @@ CREATE TABLE IF NOT EXISTS offers (
 );
 CREATE INDEX IF NOT EXISTS offers_created_idx ON offers(created_at DESC);
 CREATE INDEX IF NOT EXISTS offers_status_idx ON offers(status,created_at DESC);
+
+-- CUSTOMER EXPERIENCE / STATUS EMAILS
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS last_status_email text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS last_status_email_at timestamptz;
+
+
+-- FIREARM CHECKOUT COMPLIANCE GATE
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS buyer_date_of_birth date;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS buyer_residence_state text;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS state_law_reviewed boolean NOT NULL DEFAULT false;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS age_reviewed boolean NOT NULL DEFAULT false;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS identity_reviewed boolean NOT NULL DEFAULT false;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS ffl_verified boolean NOT NULL DEFAULT false;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS release_approved boolean NOT NULL DEFAULT false;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_status text NOT NULL DEFAULT 'hold';
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_notes text NOT NULL DEFAULT '';
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_reviewed_at timestamptz;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_reviewed_by uuid REFERENCES users(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS state_law_profiles (
+  state_code text PRIMARY KEY,
+  state_name text NOT NULL,
+  review_level text NOT NULL DEFAULT 'manual_review',
+  summary text NOT NULL DEFAULT '',
+  source_url text NOT NULL DEFAULT 'https://www.atf.gov/firearms/tools-and-services-firearms-industry/state-laws-and-published-ordinances-firearms',
+  internal_notes text NOT NULL DEFAULT '',
+  last_verified_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  updated_by uuid REFERENCES users(id) ON DELETE SET NULL
+);
+
+
+-- YEAR-END SALES / TAX REPORTING SNAPSHOTS
+-- Store the jurisdiction/rate used at checkout so future reports do not have to infer current tax settings.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_state text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tax_rate_bps_snapshot integer;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_cents integer NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_tax_cents integer NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_at timestamptz;
+CREATE INDEX IF NOT EXISTS orders_tax_year_idx ON orders(created_at,payment_status);
