@@ -8,6 +8,9 @@ import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import { z } from 'zod';
 import nodemailer from 'nodemailer';
+import multer from 'multer';
+import * as XLSX from 'xlsx';
+import zipcodes from 'zipcodes';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -548,17 +551,57 @@ app.patch('/api/state-law-profiles/:state',auth,requireRole('manager'),async(req
   await audit(req,'UPDATE','state_law_profile',null,{state:code,fields:Object.keys(x)});res.json(rows[0]);
 });
 
+
+const atfUpload=multer({storage:multer.memoryStorage(),limits:{fileSize:25*1024*1024}});
+function firstField(row,names){for(const n of names){if(row[n]!==undefined&&row[n]!==null&&String(row[n]).trim()!=='')return String(row[n]).trim()}return ''}
+function atfDealerFromRow(row){
+  const norm={};for(const [k,v] of Object.entries(row||{}))norm[String(k).trim().toUpperCase().replace(/[^A-Z0-9]+/g,'_')]=v;
+  const type=firstField(norm,['LIC_TYPE','LICENSE_TYPE','TYPE']).padStart(2,'0');
+  if(['03','06'].includes(type))return null;
+  const name=firstField(norm,['BUSINESS_NAME','TRADE_NAME','DBA_NAME','LICENSE_NAME','LIC_NAME']);
+  const address1=firstField(norm,['PREMISE_STREET','PREMISE_ADDRESS','PREMISES_STREET','STREET']);
+  const city=firstField(norm,['PREMISE_CITY','PREMISES_CITY','CITY']);
+  const state=firstField(norm,['PREMISE_STATE','PREMISES_STATE','STATE']).toUpperCase();
+  let postal=firstField(norm,['PREMISE_ZIP_CODE','PREMISE_ZIP','PREMISES_ZIP_CODE','ZIP_CODE','ZIP']);postal=postal.replace(/\.0$/,'').padStart(5,'0');
+  if(!name||!address1||!city||!state||postal.length<5)return null;
+  const zip5=postal.slice(0,5),z=zipcodes.lookup(zip5)||{};
+  const lic=firstField(norm,['FFL_NUMBER','LICENSE_NUMBER','LIC_NUMBER','LIC_NO']);
+  return {name,address1,city,state,postal:zip5,license_type:type||null,source_license_number:lic||null,latitude:Number.isFinite(z.latitude)?z.latitude:null,longitude:Number.isFinite(z.longitude)?z.longitude:null};
+}
+app.post('/api/ffl-dealers/import-atf',auth,requireRole('manager'),atfUpload.single('file'),async(req,res)=>{
+  if(!req.file)return res.status(400).json({error:'Choose an ATF .xlsx, .xls, .csv, or .txt file first.'});
+  try{
+    const wb=XLSX.read(req.file.buffer,{type:'buffer'}),ws=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(ws,{defval:''});
+    const parsed=raw.map(atfDealerFromRow).filter(Boolean);if(!parsed.length)return res.status(400).json({error:'No usable FFL dealer rows were found. Use the official ATF FFL listing file.'});
+    let added=0,updated=0;
+    for(const d of parsed){
+      const r=await pool.query(`INSERT INTO ffl_dealers(name,address1,city,state,postal,active,latitude,longitude,source,source_license_number,license_type,source_updated_at)
+        VALUES($1,$2,$3,$4,$5,true,$6,$7,'ATF',$8,$9,now())
+        ON CONFLICT (source,name,address1,city,state,postal) DO UPDATE SET latitude=COALESCE(EXCLUDED.latitude,ffl_dealers.latitude),longitude=COALESCE(EXCLUDED.longitude,ffl_dealers.longitude),source_license_number=COALESCE(EXCLUDED.source_license_number,ffl_dealers.source_license_number),license_type=COALESCE(EXCLUDED.license_type,ffl_dealers.license_type),active=true,source_updated_at=now(),updated_at=now() RETURNING (xmax = 0) AS inserted`,[d.name,d.address1,d.city,d.state,d.postal,d.latitude,d.longitude,d.source_license_number,d.license_type]);
+      if(r.rows[0]?.inserted)added++;else updated++;
+    }
+    await audit(req,'IMPORT','ffl_dealers',null,{source:'ATF',rows:parsed.length,added,updated,file:req.file.originalname});res.json({ok:true,rows:parsed.length,added,updated});
+  }catch(e){console.error('ATF FFL import error',e);res.status(500).json({error:'Could not import the ATF dealer file.'})}
+});
+app.get('/api/ffl-dealers/import-status',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query(`SELECT count(*)::int AS total,max(source_updated_at) AS last_import FROM ffl_dealers WHERE source='ATF'`);res.json(rows[0])});
+
 const dealerSchema=z.object({
   name:z.string().trim().min(2).max(180),address1:z.string().trim().min(2).max(180),city:z.string().trim().min(2).max(100),state:z.string().trim().min(2).max(50),postal:z.string().trim().min(3).max(20),
   phone:z.string().trim().max(40).nullable().optional(),email:z.string().trim().email().max(180).nullable().optional(),license_on_file:z.boolean().default(false),preferred:z.boolean().default(false),active:z.boolean().default(true),
   latitude:z.number().min(-90).max(90).nullable().optional(),longitude:z.number().min(-180).max(180).nullable().optional()
 });
 app.get('/api/public/ffl-dealers',async(req,res)=>{
-  const q=String(req.query.q||'').trim();const lat=Number(req.query.lat),lng=Number(req.query.lng);const hasGeo=Number.isFinite(lat)&&Number.isFinite(lng)&&Math.abs(lat)<=90&&Math.abs(lng)<=180;
-  const values=[];let where='active=true';if(q){values.push('%'+q+'%');where+=` AND (name ILIKE $1 OR city ILIKE $1 OR state ILIKE $1 OR postal ILIKE $1 OR address1 ILIKE $1)`}
-  const {rows}=await pool.query(`SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred,latitude,longitude FROM ffl_dealers WHERE ${where} LIMIT 150`,values);
+  const q=String(req.query.q||'').trim(),zipMatch=q.match(/\b(\d{5})\b/),latQ=Number(req.query.lat),lngQ=Number(req.query.lng);
+  let lat=Number.isFinite(latQ)?latQ:null,lng=Number.isFinite(lngQ)?lngQ:null;
+  if((lat==null||lng==null)&&zipMatch){const z=zipcodes.lookup(zipMatch[1]);if(z){lat=z.latitude;lng=z.longitude}}
+  const hasGeo=Number.isFinite(lat)&&Number.isFinite(lng)&&Math.abs(lat)<=90&&Math.abs(lng)<=180;
+  const values=[];let where='active=true';
+  if(q&&!zipMatch){values.push('%'+q+'%');where+=` AND (name ILIKE $1 OR city ILIKE $1 OR state ILIKE $1 OR postal ILIKE $1 OR address1 ILIKE $1)`}
+  const limit=hasGeo?2500:200;const {rows}=await pool.query(`SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred,latitude,longitude,source,source_license_number,license_type FROM ffl_dealers WHERE ${where} LIMIT ${limit}`,values);
   const rad=x=>x*Math.PI/180;const distance=(a,b,c,d)=>{const R=3958.8,da=rad(c-a),dl=rad(d-b),h=Math.sin(da/2)**2+Math.cos(rad(a))*Math.cos(rad(c))*Math.sin(dl/2)**2;return 2*R*Math.asin(Math.sqrt(h))};
-  const out=rows.map(x=>({...x,distance_miles:hasGeo&&x.latitude!=null&&x.longitude!=null?Math.round(distance(lat,lng,Number(x.latitude),Number(x.longitude))*10)/10:null})).sort((a,b)=>{if(hasGeo&&a.distance_miles!=null&&b.distance_miles!=null)return a.distance_miles-b.distance_miles;return Number(b.preferred)-Number(a.preferred)||Number(b.license_on_file)-Number(a.license_on_file)||a.name.localeCompare(b.name)}).slice(0,75);
+  let out=rows.map(x=>({...x,distance_miles:hasGeo&&x.latitude!=null&&x.longitude!=null?Math.round(distance(lat,lng,Number(x.latitude),Number(x.longitude))*10)/10:null}));
+  if(hasGeo)out=out.filter(x=>x.distance_miles!=null&&x.distance_miles<=100).sort((a,b)=>a.distance_miles-b.distance_miles||Number(b.preferred)-Number(a.preferred)||a.name.localeCompare(b.name)).slice(0,75);
+  else out=out.sort((a,b)=>Number(b.preferred)-Number(a.preferred)||Number(b.license_on_file)-Number(a.license_on_file)||a.name.localeCompare(b.name)).slice(0,75);
   res.json(out);
 });
 app.get('/api/ffl-dealers',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query('SELECT * FROM ffl_dealers ORDER BY active DESC,preferred DESC,name');res.json(rows)});
