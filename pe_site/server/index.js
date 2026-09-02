@@ -574,13 +574,14 @@ function atfDealerFromRow(row){
   let postal=firstField(norm,['PREMISE_ZIP_CODE','PREMISE_ZIP','PREMISES_ZIP_CODE','ZIP_CODE','ZIP']);postal=postal.replace(/\.0$/,'').padStart(5,'0');
   if(!name||!address1||!city||!state||postal.length<5)return null;
   const zip5=postal.slice(0,5),z=zipcodes.lookup(zip5)||{};
+  const zlat=Number(z.latitude),zlng=Number(z.longitude);
   let lic=firstField(norm,['FFL_NUMBER','LICENSE_NUMBER','LIC_NUMBER','LIC_NO']);
   if(!lic){
     const parts=['LIC_REGN','LIC_DIST','LIC_CNTY','LIC_TYPE','LIC_XPRDTE','LIC_SEQN'].map(k=>firstField(norm,[k]));
     if(parts.every(Boolean))lic=parts.join('-');
   }
   const phone=firstField(norm,['VOICE_PHONE','PHONE','TELEPHONE']);
-  return {name,address1,city,state,postal:zip5,phone:phone||null,license_type:type||null,source_license_number:lic||null,latitude:Number.isFinite(z.latitude)?z.latitude:null,longitude:Number.isFinite(z.longitude)?z.longitude:null};
+  return {name,address1,city,state,postal:zip5,phone:phone||null,license_type:type||null,source_license_number:lic||null,latitude:Number.isFinite(zlat)?zlat:null,longitude:Number.isFinite(zlng)?zlng:null};
 }
 async function upsertAtfBatch(batch){
   let added=0,updated=0;
@@ -630,13 +631,27 @@ const dealerSchema=z.object({
 app.get('/api/public/ffl-dealers',async(req,res)=>{
   const q=String(req.query.q||'').trim(),zipMatch=q.match(/\b(\d{5})\b/),latQ=Number(req.query.lat),lngQ=Number(req.query.lng);
   let lat=Number.isFinite(latQ)?latQ:null,lng=Number.isFinite(lngQ)?lngQ:null;
-  if((lat==null||lng==null)&&zipMatch){const z=zipcodes.lookup(zipMatch[1]);if(z){lat=z.latitude;lng=z.longitude}}
+  if((lat==null||lng==null)&&zipMatch){const z=zipcodes.lookup(zipMatch[1])||{};const a=Number(z.latitude),b=Number(z.longitude);if(Number.isFinite(a)&&Number.isFinite(b)){lat=a;lng=b}}
   const hasGeo=Number.isFinite(lat)&&Number.isFinite(lng)&&Math.abs(lat)<=90&&Math.abs(lng)<=180;
-  const values=[];let where='active=true';
-  if(q&&!zipMatch){values.push('%'+q+'%');where+=` AND (name ILIKE $1 OR city ILIKE $1 OR state ILIKE $1 OR postal ILIKE $1 OR address1 ILIKE $1)`}
-  const limit=hasGeo?2500:200;const {rows}=await pool.query(`SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred,latitude,longitude,source,source_license_number,license_type FROM ffl_dealers WHERE ${where} LIMIT ${limit}`,values);
+  const fields='id,name,address1,city,state,postal,phone,license_on_file,preferred,latitude,longitude,source,source_license_number,license_type';
+  let rows=[];
+  if(zipMatch&&typeof zipcodes.radius==='function'){
+    const nearbyZips=zipcodes.radius(zipMatch[1],110)||[];
+    const zips=[...new Set([zipMatch[1],...nearbyZips].map(x=>typeof x==='string'?x:String(x?.zip||x?.zipcode||'')).filter(x=>/^\d{5}$/.test(x)))];
+    if(zips.length){rows=(await pool.query(`SELECT ${fields} FROM ffl_dealers WHERE active=true AND postal = ANY($1::text[]) LIMIT 6000`,[zips])).rows}
+  }
+  if(!rows.length&&hasGeo){
+    const latPad=1.7,lngPad=Math.min(3.2,1.7/Math.max(Math.cos(lat*Math.PI/180),0.35));
+    rows=(await pool.query(`SELECT ${fields} FROM ffl_dealers WHERE active=true AND latitude BETWEEN $1 AND $2 AND longitude BETWEEN $3 AND $4 LIMIT 6000`,[lat-latPad,lat+latPad,lng-lngPad,lng+lngPad])).rows;
+  }
+  if(!rows.length){
+    const values=[];let where='active=true';
+    if(q&&!zipMatch){values.push('%'+q+'%');where+=` AND (name ILIKE $1 OR city ILIKE $1 OR state ILIKE $1 OR postal ILIKE $1 OR address1 ILIKE $1)`}
+    else if(zipMatch){values.push(zipMatch[1]);where+=` AND postal=$1`}
+    rows=(await pool.query(`SELECT ${fields} FROM ffl_dealers WHERE ${where} LIMIT 500`,values)).rows;
+  }
   const rad=x=>x*Math.PI/180;const distance=(a,b,c,d)=>{const R=3958.8,da=rad(c-a),dl=rad(d-b),h=Math.sin(da/2)**2+Math.cos(rad(a))*Math.cos(rad(c))*Math.sin(dl/2)**2;return 2*R*Math.asin(Math.sqrt(h))};
-  let out=rows.map(x=>({...x,distance_miles:hasGeo&&x.latitude!=null&&x.longitude!=null?Math.round(distance(lat,lng,Number(x.latitude),Number(x.longitude))*10)/10:null}));
+  let out=rows.map(x=>{let a=Number(x.latitude),b=Number(x.longitude);if(!Number.isFinite(a)||!Number.isFinite(b)){const z=zipcodes.lookup(String(x.postal||'').slice(0,5))||{};a=Number(z.latitude);b=Number(z.longitude)}return {...x,latitude:Number.isFinite(a)?a:null,longitude:Number.isFinite(b)?b:null,distance_miles:hasGeo&&Number.isFinite(a)&&Number.isFinite(b)?Math.round(distance(lat,lng,a,b)*10)/10:null}});
   if(hasGeo)out=out.filter(x=>x.distance_miles!=null&&x.distance_miles<=100).sort((a,b)=>a.distance_miles-b.distance_miles||Number(b.preferred)-Number(a.preferred)||a.name.localeCompare(b.name)).slice(0,75);
   else out=out.sort((a,b)=>Number(b.preferred)-Number(a.preferred)||Number(b.license_on_file)-Number(a.license_on_file)||a.name.localeCompare(b.name)).slice(0,75);
   res.json(out);
@@ -668,11 +683,11 @@ app.post('/api/public/ffl-requests',checkoutLimit,async(req,res)=>{
   const residence=String(p.data.customer.residence_state||'').toUpperCase();if(!STATE_NAMES[residence])return res.status(400).json({error:'Choose a valid state of residence.'});
   const inv=(await pool.query('SELECT id,title,regulated,quantity,public_visible,price_cents,sale_price_cents FROM inventory WHERE id=$1',[p.data.inventory_id])).rows[0];
   if(!inv||!inv.public_visible||inv.quantity<1)return res.status(404).json({error:'This item is no longer available.'});if(!inv.regulated)return res.status(400).json({error:'This checkout is only for regulated items.'});
-  let dealer=null;if(p.data.request_type==='ffl_transfer'){if(!p.data.dealer_id)return res.status(400).json({error:'Choose a receiving FFL dealer before continuing.'});dealer=(await pool.query('SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred FROM ffl_dealers WHERE id=$1 AND active=true',[p.data.dealer_id])).rows[0];if(!dealer)return res.status(400).json({error:'The selected FFL is unavailable. Please choose another dealer.'});}
+  let dealer=null;if(p.data.request_type==='ffl_transfer'){if(!p.data.dealer_id)return res.status(400).json({error:'Choose a receiving FFL dealer before continuing.'});dealer=(await pool.query('SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred,source,source_license_number,license_type FROM ffl_dealers WHERE id=$1 AND active=true',[p.data.dealer_id])).rows[0];if(!dealer)return res.status(400).json({error:'The selected FFL is unavailable. Please choose another dealer.'});}
   const requestNumber='FFL-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();const address={address1:p.data.customer.address1||'',city:p.data.customer.city||'',state:p.data.customer.state||'',postal:p.data.customer.postal||''};const quoted=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);
-  const {rows}=await pool.query(`INSERT INTO ffl_requests(request_number,inventory_id,item_title,customer_name,customer_email,customer_phone,request_type,destination_state,receiving_ffl_name,receiving_ffl_phone,notes,dealer_id,dealer_snapshot,customer_address,shipping_method,quoted_total_cents,age_certified,buyer_date_of_birth,buyer_residence_state,ffl_verified,compliance_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'hold') RETURNING request_number,status,payment_status,compliance_status`,
-    [requestNumber,inv.id,inv.title,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.request_type,dealer?.state||residence,dealer?.name||p.data.receiving_ffl_name||null,dealer?.phone||p.data.receiving_ffl_phone||null,p.data.notes,dealer?.id||null,dealer?JSON.stringify(dealer):null,JSON.stringify(address),p.data.shipping_method,quoted,p.data.age_certified,p.data.customer.date_of_birth,residence,p.data.request_type==='ffl_transfer'?!!dealer?.license_on_file:false]);
-  res.status(201).json({...rows[0],dealer:dealer?{name:dealer.name,city:dealer.city,state:dealer.state,license_on_file:dealer.license_on_file}:null,quoted_total_cents:quoted,manual_compliance_review:true});
+  const {rows}=await pool.query(`INSERT INTO ffl_requests(request_number,inventory_id,item_title,customer_name,customer_email,customer_phone,request_type,destination_state,receiving_ffl_name,receiving_ffl_phone,receiving_ffl_number,receiving_ffl_license_type,notes,dealer_id,dealer_snapshot,customer_address,shipping_method,quoted_total_cents,age_certified,buyer_date_of_birth,buyer_residence_state,ffl_verified,compliance_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,'hold') RETURNING request_number,status,payment_status,compliance_status`,
+    [requestNumber,inv.id,inv.title,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.request_type,dealer?.state||residence,dealer?.name||p.data.receiving_ffl_name||null,dealer?.phone||p.data.receiving_ffl_phone||null,dealer?.source_license_number||null,dealer?.license_type||null,p.data.notes,dealer?.id||null,dealer?JSON.stringify(dealer):null,JSON.stringify(address),p.data.shipping_method,quoted,p.data.age_certified,p.data.customer.date_of_birth,residence,p.data.request_type==='ffl_transfer'?!!dealer?.license_on_file:false]);
+  res.status(201).json({...rows[0],dealer:dealer?{name:dealer.name,city:dealer.city,state:dealer.state,license_on_file:dealer.license_on_file,source_license_number:dealer.source_license_number,license_type:dealer.license_type}:null,quoted_total_cents:quoted,manual_compliance_review:true});
 });
 app.get('/api/ffl-requests',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query('SELECT * FROM ffl_requests ORDER BY created_at DESC LIMIT 1000');res.json(rows);});
 app.patch('/api/ffl-requests/:id',auth,requireRole('manager'),async(req,res)=>{
