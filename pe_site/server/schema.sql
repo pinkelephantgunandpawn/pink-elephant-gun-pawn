@@ -317,3 +317,12 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_cents integer NOT NULL DEFA
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_tax_cents integer NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_at timestamptz;
 CREATE INDEX IF NOT EXISTS orders_tax_year_idx ON orders(created_at,payment_status);
+
+-- OFFICIAL ATF FFL DIRECTORY IMPORT / LOCATOR
+ALTER TABLE ffl_dealers ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'MANUAL';
+ALTER TABLE ffl_dealers ADD COLUMN IF NOT EXISTS source_license_number text;
+ALTER TABLE ffl_dealers ADD COLUMN IF NOT EXISTS license_type text;
+ALTER TABLE ffl_dealers ADD COLUMN IF NOT EXISTS source_updated_at timestamptz;
+CREATE UNIQUE INDEX IF NOT EXISTS ffl_dealers_source_identity_idx ON ffl_dealers(source,name,address1,city,state,postal);
+CREATE INDEX IF NOT EXISTS ffl_dealers_geo_idx ON ffl_dealers(active,latitude,longitude);
+CREATE INDEX IF NOT EXISTS ffl_dealers_postal_idx ON ffl_dealers(active,postal);
