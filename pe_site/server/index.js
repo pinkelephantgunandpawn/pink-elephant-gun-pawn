@@ -14,6 +14,7 @@ import csvParser from 'csv-parser';
 import os from 'node:os';
 import zipcodes from 'zipcodes';
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -597,7 +598,7 @@ async function upsertAtfBatch(batch){
 }
 async function importAtfCsvStream(filePath){
   let batch=[],rows=0,added=0,updated=0;
-  const stream=fs.createReadStream(filePath).pipe(csvParser({mapHeaders:({header})=>String(header||'').replace(/^\uFEFF/,'').trim()}));
+  const stream=createReadStream(filePath).pipe(csvParser({mapHeaders:({header})=>String(header||'').replace(/^\uFEFF/,'').trim()}));
   for await(const row of stream){
     const d=atfDealerFromRow(row);if(!d)continue;
     batch.push(d);rows++;
