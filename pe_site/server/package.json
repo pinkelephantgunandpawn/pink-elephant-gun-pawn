@@ -20,6 +20,7 @@
     "nodemailer": "^7.0.6",
     "multer": "^2.0.2",
     "xlsx": "^0.18.5",
-    "zipcodes": "^8.0.0"
+    "zipcodes": "^8.0.0",
+    "exceljs": "^4.4.0"
   }
 }
