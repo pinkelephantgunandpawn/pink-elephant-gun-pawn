@@ -73,17 +73,33 @@ function smtpTransport(){
   if(!process.env.SMTP_HOST||!process.env.SMTP_USER||!process.env.SMTP_PASS)return null;
   return nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),secure:String(process.env.SMTP_SECURE||'false').toLowerCase()==='true',auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}});
 }
-async function sendOrderConfirmation(orderId){
-  const tx=smtpTransport();if(!tx)return {sent:false,reason:'SMTP not configured'};
+async function loadOrderForEmail(orderId){
   const {rows}=await pool.query(`SELECT o.*,COALESCE(json_agg(json_build_object('title',oi.item_title,'quantity',oi.quantity,'line_total_cents',oi.line_total_cents)) FILTER (WHERE oi.id IS NOT NULL),'[]') AS items FROM orders o LEFT JOIN order_items oi ON oi.order_id=o.id WHERE o.id=$1 GROUP BY o.id`,[orderId]);
-  const o=rows[0];if(!o)return {sent:false,reason:'Order not found'};
-  const money=c=>'$'+(Number(c||0)/100).toFixed(2);
-  const lines=(o.items||[]).map(i=>`${i.title} x ${i.quantity} — ${money(i.line_total_cents)}`).join('\n');
-  const from=process.env.ORDER_FROM_EMAIL||process.env.SMTP_USER;
-  const text=`Thanks for your order with Pink Elephant Gun & Pawn.\n\nOrder ${o.order_number}\n${lines}\n\nSubtotal: ${money(o.subtotal_cents)}\nTax: ${money(o.tax_cents)}\nShipping: ${money(o.shipping_cents)}\nTotal: ${money(o.total_cents)}\n\nPayment status: ${o.payment_status}.`;
-  try{await tx.sendMail({from,to:o.customer_email,subject:`Pink Elephant order ${o.order_number}`,text});await pool.query('UPDATE orders SET customer_email_sent_at=now(),customer_email_error=NULL WHERE id=$1',[o.id]);return {sent:true}}
-  catch(e){const detail=`SMTP ERROR code=${e?.code||'unknown'} command=${e?.command||'unknown'} host=${process.env.SMTP_HOST||'missing'} port=${process.env.SMTP_PORT||'587'} secure=${process.env.SMTP_SECURE||'false'} message=${e?.message||e}`;console.error(detail);await pool.query('UPDATE orders SET customer_email_error=$1 WHERE id=$2',[detail.slice(0,1000),o.id]);return {sent:false,reason:detail}}
+  return rows[0]||null;
 }
+function moneyText(c){return '$'+(Number(c||0)/100).toFixed(2)}
+function emailShell(title,body){return `<!doctype html><html><body style="margin:0;background:#f4f4f6;font-family:Arial,Helvetica,sans-serif;color:#18181b"><div style="max-width:640px;margin:0 auto;padding:28px 14px"><div style="background:#e86aa7;color:#16070f;padding:18px 22px;border-radius:14px 14px 0 0"><div style="font-size:22px;font-weight:900">Pink Elephant Gun &amp; Pawn</div><div style="font-size:13px;font-weight:700">Prestonsburg, Kentucky</div></div><div style="background:#fff;border:1px solid #ddd;padding:24px;border-radius:0 0 14px 14px"><h2 style="margin-top:0">${title}</h2>${body}<hr style="border:0;border-top:1px solid #eee;margin:24px 0"><div style="font-size:13px;color:#666">Pink Elephant Gun &amp; Pawn • 30 Colonels Ct, Prestonsburg, KY 41653 • (606) 506-5030</div></div></div></body></html>`}
+async function sendOrderEmail(orderId,type='confirmation'){
+  const tx=smtpTransport();if(!tx)return {sent:false,reason:'SMTP not configured'};
+  const o=await loadOrderForEmail(orderId);if(!o)return {sent:false,reason:'Order not found'};
+  const from=process.env.ORDER_FROM_EMAIL||process.env.SMTP_USER;
+  const lines=(o.items||[]).map(i=>`${i.title} x ${i.quantity} — ${moneyText(i.line_total_cents)}`).join('\n');
+  const itemHtml=(o.items||[]).map(i=>`<tr><td style="padding:7px 0">${String(i.title).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]))} × ${i.quantity}</td><td style="padding:7px 0;text-align:right">${moneyText(i.line_total_cents)}</td></tr>`).join('');
+  const tracking=o.tracking_number?(o.tracking_url?`<p><a href="${o.tracking_url}" style="display:inline-block;background:#e86aa7;color:#16070f;text-decoration:none;font-weight:900;padding:11px 16px;border-radius:8px">TRACK PACKAGE</a><br><span style="font-size:12px;color:#666">${o.tracking_number}</span></p>`:`<p><b>Tracking:</b> ${o.tracking_number}</p>`):'';
+  const subjects={confirmation:`Order received — ${o.order_number}`,confirmed:`Order confirmed — ${o.order_number}`,ready:`Your order is ready — ${o.order_number}`,shipped:`Your order shipped — ${o.order_number}`,completed:`Order complete — ${o.order_number}`,cancelled:`Order cancelled — ${o.order_number}`};
+  const intros={confirmation:'Thanks for your order. We received it and will keep you updated as it moves through the shop.',confirmed:'Your order has been confirmed and is being prepared.',ready:o.fulfillment==='pickup'?'Your order is ready for pickup at Pink Elephant Gun & Pawn.':'Your order is packed and ready for the next shipping step.',shipped:'Your order has shipped. Tracking information is below.',completed:'Your order is complete. Thanks for shopping with Pink Elephant Gun & Pawn.',cancelled:'This order has been cancelled. If you have questions, call the shop at (606) 506-5030.'};
+  const intro=intros[type]||intros.confirmation;
+  const summary=`<p>${intro}</p><p><b>Order:</b> ${o.order_number}</p><table style="width:100%;border-collapse:collapse">${itemHtml}<tr><td style="padding-top:12px;border-top:1px solid #eee">Subtotal</td><td style="padding-top:12px;border-top:1px solid #eee;text-align:right">${moneyText(o.subtotal_cents)}</td></tr><tr><td>Tax</td><td style="text-align:right">${moneyText(o.tax_cents)}</td></tr><tr><td>Shipping</td><td style="text-align:right">${moneyText(o.shipping_cents)}</td></tr><tr><td style="font-weight:900;padding-top:7px">Total</td><td style="font-weight:900;text-align:right;padding-top:7px">${moneyText(o.total_cents)}</td></tr></table>${type==='shipped'?tracking:''}`;
+  const text=`${intro}\n\nOrder ${o.order_number}\n${lines}\n\nSubtotal: ${moneyText(o.subtotal_cents)}\nTax: ${moneyText(o.tax_cents)}\nShipping: ${moneyText(o.shipping_cents)}\nTotal: ${moneyText(o.total_cents)}${o.tracking_number?`\nTracking: ${o.tracking_number}${o.tracking_url?' '+o.tracking_url:''}`:''}`;
+  try{
+    await tx.sendMail({from,to:o.customer_email,subject:`Pink Elephant — ${subjects[type]||subjects.confirmation}`,text,html:emailShell(subjects[type]||'Order update',summary)});
+    if(type==='confirmation')await pool.query('UPDATE orders SET customer_email_sent_at=now(),customer_email_error=NULL WHERE id=$1',[o.id]);
+    else await pool.query('UPDATE orders SET last_status_email=$1,last_status_email_at=now(),customer_email_error=NULL WHERE id=$2',[type,o.id]);
+    return {sent:true,type};
+  }catch(e){const detail=`SMTP ERROR code=${e?.code||'unknown'} command=${e?.command||'unknown'} host=${process.env.SMTP_HOST||'missing'} port=${process.env.SMTP_PORT||'587'} secure=${process.env.SMTP_SECURE||'false'} message=${e?.message||e}`;console.error(detail);await pool.query('UPDATE orders SET customer_email_error=$1 WHERE id=$2',[detail.slice(0,1000),o.id]);return {sent:false,reason:detail}}
+}
+async function sendOrderConfirmation(orderId){return sendOrderEmail(orderId,'confirmation')}
+
 
 
 const roles = { viewer: 1, manager: 2, admin: 3 };
@@ -115,6 +131,7 @@ app.get('/api/public/inventory',async (_req,res)=>{
   const {rows}=await pool.query(`SELECT id,title,category,quantity,price_cents,price_label,sale_price_cents,sku,item_type,condition,description,image_url,image_urls,regulated,featured,created_at,updated_at,low_stock FROM inventory WHERE public_visible=true AND quantity>0 ORDER BY updated_at DESC`);
   res.json(rows);
 });
+app.get('/api/public/store-config',(_req,res)=>res.json({mobilepawn_url:process.env.MOBILEPAWN_URL||null,mobilepawn_enabled:!!process.env.MOBILEPAWN_URL}));
 
 // ---------- SHIPPO TEST SHIPPING RATES ----------
 const SHIPPO_API='https://api.goshippo.com';
@@ -311,7 +328,7 @@ app.post('/api/public/order-lookup',async(req,res)=>{
 app.get('/api/customer/orders',customerAuth,async(req,res)=>{
   try{
     const q=await pool.query(
-      `select o.*,coalesce(json_agg(json_build_object('title',oi.title,'quantity',oi.quantity,'unit_price_cents',oi.unit_price_cents)) filter (where oi.id is not null),'[]') items
+      `select o.*,coalesce(json_agg(json_build_object('title',oi.item_title,'quantity',oi.quantity,'unit_price_cents',oi.unit_price_cents,'line_total_cents',oi.line_total_cents)) filter (where oi.id is not null),'[]') items
        from orders o left join order_items oi on oi.order_id=o.id
        where o.customer_id=$1 or lower(o.customer_email)=lower($2)
        group by o.id order by o.created_at desc`,
@@ -356,8 +373,8 @@ app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
     const shippingCents=verifiedShipping?.cents||0;
     const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents,state:p.data.shipping?.state,fulfillment:p.data.fulfillment});
     const total=subtotal+shippingCents+tax.tax_cents;
-    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service,customer_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id,order_number,subtotal_cents,tax_cents,shipping_cents,total_cents,order_status,payment_status`,
-      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal,tax.tax_cents,shippingCents,total,verifiedShipping?.rate_id||null,verifiedShipping?.shipment_id||null,verifiedShipping?.provider||null,verifiedShipping?.service||null,checkoutCustomerId])).rows[0];
+    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service,customer_id,tax_state,tax_rate_bps_snapshot) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id,order_number,subtotal_cents,tax_cents,shipping_cents,total_cents,order_status,payment_status`,
+      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal,tax.tax_cents,shippingCents,total,verifiedShipping?.rate_id||null,verifiedShipping?.shipment_id||null,verifiedShipping?.provider||null,verifiedShipping?.service||null,checkoutCustomerId,tax.state||null,tax.rate_bps??null])).rows[0];
     for(const item of items){
       await c.query(`INSERT INTO order_items(order_id,inventory_id,item_title,quantity,unit_price_cents,line_total_cents) VALUES($1,$2,$3,$4,$5,$6)`,
         [order.id,item.inv.id,item.inv.title,item.quantity,item.unit,item.line]);
@@ -438,7 +455,7 @@ app.get('/api/orders',auth,requireRole('viewer'),async(req,res)=>{
   res.json(rows);
 });
 app.patch('/api/orders/:id',auth,requireRole('manager'),async(req,res)=>{
-  const p=z.object({order_status:z.enum(['new','confirmed','ready','shipped','completed','cancelled']).optional(),payment_status:z.enum(['pending','paid','refunded','cancelled']).optional(),tracking_number:z.string().max(180).nullable().optional(),admin_notes:z.string().max(3000).optional(),paid_at:z.coerce.date().optional(),shipped_at:z.coerce.date().optional(),completed_at:z.coerce.date().optional(),cancelled_at:z.coerce.date().optional(),admin_hidden:z.boolean().optional()}).safeParse(req.body);
+  const p=z.object({order_status:z.enum(['new','confirmed','ready','shipped','completed','cancelled']).optional(),payment_status:z.enum(['pending','paid','refunded','cancelled']).optional(),tracking_number:z.string().max(180).nullable().optional(),admin_notes:z.string().max(3000).optional(),paid_at:z.coerce.date().optional(),shipped_at:z.coerce.date().optional(),completed_at:z.coerce.date().optional(),cancelled_at:z.coerce.date().optional(),admin_hidden:z.boolean().optional(),refunded_cents:z.number().int().min(0).optional(),refunded_tax_cents:z.number().int().min(0).optional(),refunded_at:z.coerce.date().nullable().optional()}).safeParse(req.body);
   if(!p.success)return res.status(400).json({error:p.error.issues});const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});
   const c=await pool.connect();try{await c.query('BEGIN');const current=(await c.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE',[req.params.id])).rows[0];if(!current){await c.query('ROLLBACK');return res.status(404).json({error:'Order not found'})}
     if(p.data.order_status==='cancelled'&&!current.inventory_restocked){const {rows:items}=await c.query('SELECT inventory_id,quantity FROM order_items WHERE order_id=$1',[current.id]);for(const i of items)if(i.inventory_id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[i.quantity,i.inventory_id]);p.data.inventory_restocked=true}
@@ -446,7 +463,7 @@ app.patch('/api/orders/:id',auth,requireRole('manager'),async(req,res)=>{
     if(p.data.order_status==='shipped'&&!current.shipped_at)p.data.shipped_at=new Date();
     if(p.data.order_status==='completed'&&!current.completed_at)p.data.completed_at=new Date();
     if(p.data.order_status==='cancelled'&&!current.cancelled_at)p.data.cancelled_at=new Date();
-    const k2=Object.keys(p.data);const vals=[];const sets=[];k2.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.params.id);const {rows}=await c.query(`UPDATE orders SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals);await c.query('COMMIT');await audit(req,'UPDATE','order',rows[0].id,{fields:k2});res.json(rows[0]);
+    const k2=Object.keys(p.data);const vals=[];const sets=[];k2.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.params.id);const {rows}=await c.query(`UPDATE orders SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals);await c.query('COMMIT');await audit(req,'UPDATE','order',rows[0].id,{fields:k2});const changedStatus=p.data.order_status&&p.data.order_status!==current.order_status;res.json(rows[0]);if(changedStatus&&['confirmed','ready','shipped','completed','cancelled'].includes(p.data.order_status))sendOrderEmail(rows[0].id,p.data.order_status).catch(console.error);
   }catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e);res.status(500).json({error:'Could not update order'})}finally{c.release()}
 });
 
@@ -504,17 +521,45 @@ app.post('/api/orders/:id/refund-label',auth,requireRole('manager'),async(req,re
 });
 
 
+
+const ATF_STATE_LAWS_URL='https://www.atf.gov/firearms/tools-and-services-firearms-industry/state-laws-and-published-ordinances-firearms';
+const ATF_EZCHECK_URL='https://fflezcheck.atf.gov/FFLEzCheck/fflSearch.action?warning_banner_accept=true';
+const STATE_NAMES={AL:'Alabama',AK:'Alaska',AZ:'Arizona',AR:'Arkansas',CA:'California',CO:'Colorado',CT:'Connecticut',DE:'Delaware',DC:'District of Columbia',FL:'Florida',GA:'Georgia',HI:'Hawaii',ID:'Idaho',IL:'Illinois',IN:'Indiana',IA:'Iowa',KS:'Kansas',KY:'Kentucky',LA:'Louisiana',ME:'Maine',MD:'Maryland',MA:'Massachusetts',MI:'Michigan',MN:'Minnesota',MS:'Mississippi',MO:'Missouri',MT:'Montana',NE:'Nebraska',NV:'Nevada',NH:'New Hampshire',NJ:'New Jersey',NM:'New Mexico',NY:'New York',NC:'North Carolina',ND:'North Dakota',OH:'Ohio',OK:'Oklahoma',OR:'Oregon',PA:'Pennsylvania',RI:'Rhode Island',SC:'South Carolina',SD:'South Dakota',TN:'Tennessee',TX:'Texas',UT:'Utah',VT:'Vermont',VA:'Virginia',WA:'Washington',WV:'West Virginia',WI:'Wisconsin',WY:'Wyoming'};
+const STATE_REVIEW_TEMPLATE=code=>({
+  state_code:code,state_name:STATE_NAMES[code]||code,review_level:'manual_review',
+  summary:`Manual compliance review required before release. Confirm current ${STATE_NAMES[code]||code} law for the firearm type, purchaser residency/age, permits or waiting periods, prohibited configurations/features, magazine restrictions, and any applicable local rules. Do not rely on this summary alone.`,
+  source_url:ATF_STATE_LAWS_URL
+});
+async function ensureStateLawProfiles(){
+  for(const code of Object.keys(STATE_NAMES)){
+    const x=STATE_REVIEW_TEMPLATE(code);
+    await pool.query(`INSERT INTO state_law_profiles(state_code,state_name,review_level,summary,source_url) VALUES($1,$2,$3,$4,$5) ON CONFLICT(state_code) DO NOTHING`,[x.state_code,x.state_name,x.review_level,x.summary,x.source_url]);
+  }
+}
+app.get('/api/state-law-profiles',auth,requireRole('viewer'),async(_req,res)=>{
+  try{await ensureStateLawProfiles();const {rows}=await pool.query('SELECT * FROM state_law_profiles ORDER BY state_name');res.json({official_atf_url:ATF_STATE_LAWS_URL,ffl_ezcheck_url:ATF_EZCHECK_URL,profiles:rows})}
+  catch(e){console.error(e);res.status(500).json({error:'Could not load state law references'})}
+});
+app.patch('/api/state-law-profiles/:state',auth,requireRole('manager'),async(req,res)=>{
+  const code=String(req.params.state||'').toUpperCase();if(!STATE_NAMES[code])return res.status(404).json({error:'Unknown state'});
+  const p=z.object({review_level:z.enum(['manual_review','restricted','blocked','store_policy_ok']).optional(),summary:z.string().max(6000).optional(),internal_notes:z.string().max(6000).optional(),source_url:z.string().url().max(1000).optional(),mark_verified:z.boolean().optional()}).safeParse(req.body);
+  if(!p.success)return res.status(400).json({error:'Invalid state-law update'});await ensureStateLawProfiles();
+  const x=p.data;const {rows}=await pool.query(`UPDATE state_law_profiles SET review_level=COALESCE($1,review_level),summary=COALESCE($2,summary),internal_notes=COALESCE($3,internal_notes),source_url=COALESCE($4,source_url),last_verified_at=CASE WHEN $5 THEN now() ELSE last_verified_at END,updated_at=now(),updated_by=$6 WHERE state_code=$7 RETURNING *`,[x.review_level??null,x.summary??null,x.internal_notes??null,x.source_url??null,!!x.mark_verified,req.user.sub,code]);
+  await audit(req,'UPDATE','state_law_profile',null,{state:code,fields:Object.keys(x)});res.json(rows[0]);
+});
+
 const dealerSchema=z.object({
   name:z.string().trim().min(2).max(180),address1:z.string().trim().min(2).max(180),city:z.string().trim().min(2).max(100),state:z.string().trim().min(2).max(50),postal:z.string().trim().min(3).max(20),
   phone:z.string().trim().max(40).nullable().optional(),email:z.string().trim().email().max(180).nullable().optional(),license_on_file:z.boolean().default(false),preferred:z.boolean().default(false),active:z.boolean().default(true),
   latitude:z.number().min(-90).max(90).nullable().optional(),longitude:z.number().min(-180).max(180).nullable().optional()
 });
 app.get('/api/public/ffl-dealers',async(req,res)=>{
-  const q=String(req.query.q||'').trim();
-  const values=[]; let where='active=true';
-  if(q){values.push('%'+q+'%');where+=` AND (name ILIKE $1 OR city ILIKE $1 OR state ILIKE $1 OR postal ILIKE $1 OR address1 ILIKE $1)`}
-  const {rows}=await pool.query(`SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred,latitude,longitude FROM ffl_dealers WHERE ${where} ORDER BY preferred DESC,license_on_file DESC,name ASC LIMIT 75`,values);
-  res.json(rows);
+  const q=String(req.query.q||'').trim();const lat=Number(req.query.lat),lng=Number(req.query.lng);const hasGeo=Number.isFinite(lat)&&Number.isFinite(lng)&&Math.abs(lat)<=90&&Math.abs(lng)<=180;
+  const values=[];let where='active=true';if(q){values.push('%'+q+'%');where+=` AND (name ILIKE $1 OR city ILIKE $1 OR state ILIKE $1 OR postal ILIKE $1 OR address1 ILIKE $1)`}
+  const {rows}=await pool.query(`SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred,latitude,longitude FROM ffl_dealers WHERE ${where} LIMIT 150`,values);
+  const rad=x=>x*Math.PI/180;const distance=(a,b,c,d)=>{const R=3958.8,da=rad(c-a),dl=rad(d-b),h=Math.sin(da/2)**2+Math.cos(rad(a))*Math.cos(rad(c))*Math.sin(dl/2)**2;return 2*R*Math.asin(Math.sqrt(h))};
+  const out=rows.map(x=>({...x,distance_miles:hasGeo&&x.latitude!=null&&x.longitude!=null?Math.round(distance(lat,lng,Number(x.latitude),Number(x.longitude))*10)/10:null})).sort((a,b)=>{if(hasGeo&&a.distance_miles!=null&&b.distance_miles!=null)return a.distance_miles-b.distance_miles;return Number(b.preferred)-Number(a.preferred)||Number(b.license_on_file)-Number(a.license_on_file)||a.name.localeCompare(b.name)}).slice(0,75);
+  res.json(out);
 });
 app.get('/api/ffl-dealers',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query('SELECT * FROM ffl_dealers ORDER BY active DESC,preferred DESC,name');res.json(rows)});
 app.post('/api/ffl-dealers',auth,requireRole('manager'),async(req,res)=>{
@@ -531,33 +576,32 @@ app.delete('/api/ffl-dealers/:id',auth,requireRole('manager'),async(req,res)=>{c
 
 const fflRequestSchema=z.object({
   inventory_id:z.string().uuid(),
-  customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40),address1:z.string().trim().max(180).optional(),city:z.string().trim().max(100).optional(),state:z.string().trim().max(50).optional(),postal:z.string().trim().max(20).optional()}),
+  customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40),address1:z.string().trim().max(180).optional(),city:z.string().trim().max(100).optional(),state:z.string().trim().min(2).max(50),postal:z.string().trim().max(20).optional(),date_of_birth:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),residence_state:z.string().trim().min(2).max(2)}),
   request_type:z.enum(['store_pickup','ffl_transfer']),dealer_id:z.string().uuid().nullable().optional(),
   receiving_ffl_name:z.string().trim().max(180).nullable().optional(),receiving_ffl_phone:z.string().trim().max(40).nullable().optional(),
   shipping_method:z.enum(['store_pickup','standard_ground','store_review']).default('store_review'),age_certified:z.literal(true),notes:z.string().trim().max(1500).default('')
 });
 app.post('/api/public/ffl-requests',checkoutLimit,async(req,res)=>{
-  const p=fflRequestSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Please check every required checkout field, including the certification box.'});
+  const p=fflRequestSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Please check every required checkout field, including date of birth, residence state, and certification.'});
+  const dob=new Date(p.data.customer.date_of_birth+'T12:00:00Z');if(Number.isNaN(dob.getTime()))return res.status(400).json({error:'Enter a valid date of birth.'});
+  const now=new Date();let age=now.getUTCFullYear()-dob.getUTCFullYear();const m=now.getUTCMonth()-dob.getUTCMonth();if(m<0||(m===0&&now.getUTCDate()<dob.getUTCDate()))age--;if(age<18)return res.status(400).json({error:'Online firearm requests cannot be submitted by a person under 18.'});
+  const residence=String(p.data.customer.residence_state||'').toUpperCase();if(!STATE_NAMES[residence])return res.status(400).json({error:'Choose a valid state of residence.'});
   const inv=(await pool.query('SELECT id,title,regulated,quantity,public_visible,price_cents,sale_price_cents FROM inventory WHERE id=$1',[p.data.inventory_id])).rows[0];
-  if(!inv||!inv.public_visible||inv.quantity<1)return res.status(404).json({error:'This item is no longer available.'});
-  if(!inv.regulated)return res.status(400).json({error:'This checkout is only for regulated items.'});
-  let dealer=null;
-  if(p.data.request_type==='ffl_transfer'){
-    if(!p.data.dealer_id)return res.status(400).json({error:'Choose a receiving FFL dealer before continuing.'});
-    dealer=(await pool.query('SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred FROM ffl_dealers WHERE id=$1 AND active=true',[p.data.dealer_id])).rows[0];
-    if(!dealer)return res.status(400).json({error:'The selected FFL is unavailable. Please choose another dealer.'});
-  }
-  const requestNumber='FFL-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
-  const address={address1:p.data.customer.address1||'',city:p.data.customer.city||'',state:p.data.customer.state||'',postal:p.data.customer.postal||''};
-  const quoted=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);
-  const {rows}=await pool.query(`INSERT INTO ffl_requests(request_number,inventory_id,item_title,customer_name,customer_email,customer_phone,request_type,destination_state,receiving_ffl_name,receiving_ffl_phone,notes,dealer_id,dealer_snapshot,customer_address,shipping_method,quoted_total_cents,age_certified) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING request_number,status,payment_status`,
-    [requestNumber,inv.id,inv.title,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.request_type,dealer?.state||p.data.customer.state||null,dealer?.name||p.data.receiving_ffl_name||null,dealer?.phone||p.data.receiving_ffl_phone||null,p.data.notes,dealer?.id||null,dealer?JSON.stringify(dealer):null,JSON.stringify(address),p.data.shipping_method,quoted,p.data.age_certified]);
-  res.status(201).json({...rows[0],dealer:dealer?{name:dealer.name,city:dealer.city,state:dealer.state}:null,quoted_total_cents:quoted});
+  if(!inv||!inv.public_visible||inv.quantity<1)return res.status(404).json({error:'This item is no longer available.'});if(!inv.regulated)return res.status(400).json({error:'This checkout is only for regulated items.'});
+  let dealer=null;if(p.data.request_type==='ffl_transfer'){if(!p.data.dealer_id)return res.status(400).json({error:'Choose a receiving FFL dealer before continuing.'});dealer=(await pool.query('SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred FROM ffl_dealers WHERE id=$1 AND active=true',[p.data.dealer_id])).rows[0];if(!dealer)return res.status(400).json({error:'The selected FFL is unavailable. Please choose another dealer.'});}
+  const requestNumber='FFL-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();const address={address1:p.data.customer.address1||'',city:p.data.customer.city||'',state:p.data.customer.state||'',postal:p.data.customer.postal||''};const quoted=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);
+  const {rows}=await pool.query(`INSERT INTO ffl_requests(request_number,inventory_id,item_title,customer_name,customer_email,customer_phone,request_type,destination_state,receiving_ffl_name,receiving_ffl_phone,notes,dealer_id,dealer_snapshot,customer_address,shipping_method,quoted_total_cents,age_certified,buyer_date_of_birth,buyer_residence_state,ffl_verified,compliance_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'hold') RETURNING request_number,status,payment_status,compliance_status`,
+    [requestNumber,inv.id,inv.title,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.request_type,dealer?.state||residence,dealer?.name||p.data.receiving_ffl_name||null,dealer?.phone||p.data.receiving_ffl_phone||null,p.data.notes,dealer?.id||null,dealer?JSON.stringify(dealer):null,JSON.stringify(address),p.data.shipping_method,quoted,p.data.age_certified,p.data.customer.date_of_birth,residence,p.data.request_type==='ffl_transfer'?!!dealer?.license_on_file:false]);
+  res.status(201).json({...rows[0],dealer:dealer?{name:dealer.name,city:dealer.city,state:dealer.state,license_on_file:dealer.license_on_file}:null,quoted_total_cents:quoted,manual_compliance_review:true});
 });
 app.get('/api/ffl-requests',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query('SELECT * FROM ffl_requests ORDER BY created_at DESC LIMIT 1000');res.json(rows);});
 app.patch('/api/ffl-requests/:id',auth,requireRole('manager'),async(req,res)=>{
-  const p=z.object({status:z.enum(['new','contacted','awaiting_ffl','ready','completed','declined','cancelled'])}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid status'});
-  const {rows}=await pool.query('UPDATE ffl_requests SET status=$1,updated_at=now() WHERE id=$2 RETURNING *',[p.data.status,req.params.id]);if(!rows[0])return res.status(404).json({error:'Request not found'});res.json(rows[0]);
+  const p=z.object({status:z.enum(['new','contacted','awaiting_ffl','ready','completed','declined','cancelled']).optional(),state_law_reviewed:z.boolean().optional(),age_reviewed:z.boolean().optional(),identity_reviewed:z.boolean().optional(),ffl_verified:z.boolean().optional(),release_approved:z.boolean().optional(),compliance_notes:z.string().max(6000).optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid firearm request update'});
+  const current=(await pool.query('SELECT * FROM ffl_requests WHERE id=$1',[req.params.id])).rows[0];if(!current)return res.status(404).json({error:'Request not found'});const next={...current,...p.data};const needsFfl=next.request_type==='ffl_transfer';
+  const cleared=!!next.state_law_reviewed&&!!next.age_reviewed&&!!next.identity_reviewed&&(!needsFfl||!!next.ffl_verified)&&!!next.release_approved;
+  if(['ready','completed'].includes(p.data.status)&&!cleared)return res.status(409).json({error:'Compliance hold: complete state-law, age/ID, receiving-FFL verification (when shipped), and RELEASE APPROVED before marking this request ready/completed.'});
+  const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});const vals=[],sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});sets.push(`compliance_status=$${vals.length+1}`,`compliance_reviewed_at=CASE WHEN $${vals.length+1}='cleared' THEN now() ELSE compliance_reviewed_at END`,`compliance_reviewed_by=CASE WHEN $${vals.length+1}='cleared' THEN $${vals.length+2} ELSE compliance_reviewed_by END`,`updated_at=now()`);vals.push(cleared?'cleared':'hold',req.user.sub,req.params.id);
+  const {rows}=await pool.query(`UPDATE ffl_requests SET ${sets.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);await audit(req,'UPDATE','ffl_request',rows[0].id,{fields:keys,compliance_status:rows[0].compliance_status});res.json(rows[0]);
 });
 
 
@@ -573,6 +617,37 @@ const batchPatchSchema=z.object({title:z.string().trim().max(180).optional(),sug
 app.patch('/api/batch-items/:id',auth,requireRole('manager'),async(req,res)=>{const p=batchPatchSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid batch item changes'});const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});const vals=[];const sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.params.id);const {rows}=await pool.query(`UPDATE batch_items SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:'Batch item not found'});res.json(rows[0])});
 app.post('/api/batch-items/:id/analyze',auth,requireRole('manager'),async(req,res)=>{const item=(await pool.query('SELECT * FROM batch_items WHERE id=$1',[req.params.id])).rows[0];if(!item)return res.status(404).json({error:'Batch item not found'});const analyzer=process.env.BATCH_ANALYZER_URL?.trim();if(!analyzer)return res.status(503).json({error:'Automatic image identification is ready to connect, but BATCH_ANALYZER_URL is not configured yet.',needs_configuration:true});try{const headers={'Content-Type':'application/json'};if(process.env.BATCH_ANALYZER_SECRET)headers.Authorization='Bearer '+process.env.BATCH_ANALYZER_SECRET;const r=await fetch(analyzer,{method:'POST',headers,body:JSON.stringify({filename:item.filename,image_data:item.image_data})});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Analyzer request failed');const clean={suggested_title:String(j.title||'').slice(0,180)||null,title:String(j.title||'').slice(0,180)||item.title,category:String(j.category||'Other').slice(0,80),condition:String(j.condition||'Good').slice(0,80),suggested_price_cents:Number.isFinite(Number(j.suggested_price_cents))?Math.max(0,Math.round(Number(j.suggested_price_cents))):null,price_cents:Number.isFinite(Number(j.suggested_price_cents))?Math.max(0,Math.round(Number(j.suggested_price_cents))):item.price_cents,market_low_cents:Number.isFinite(Number(j.market_low_cents))?Math.max(0,Math.round(Number(j.market_low_cents))):null,market_high_cents:Number.isFinite(Number(j.market_high_cents))?Math.max(0,Math.round(Number(j.market_high_cents))):null,confidence:Number.isFinite(Number(j.confidence))?Math.max(0,Math.min(1,Number(j.confidence))):null,source_label:String(j.source_label||'Automated lookup').slice(0,120),status:'analyzed'};const {rows}=await pool.query(`UPDATE batch_items SET suggested_title=$1,title=$2,category=$3,condition=$4,suggested_price_cents=$5,price_cents=$6,market_low_cents=$7,market_high_cents=$8,confidence=$9,source_label=$10,status=$11,updated_at=now() WHERE id=$12 RETURNING *`,[clean.suggested_title,clean.title,clean.category,clean.condition,clean.suggested_price_cents,clean.price_cents,clean.market_low_cents,clean.market_high_cents,clean.confidence,clean.source_label,clean.status,item.id]);res.json(rows[0])}catch(e){console.error(e);await pool.query("UPDATE batch_items SET status='error',updated_at=now() WHERE id=$1",[item.id]);res.status(502).json({error:'Automatic lookup failed: '+e.message})}});
 app.post('/api/batches/:id/publish',auth,requireRole('manager'),async(req,res)=>{const p=z.object({item_ids:z.array(z.string().uuid()).min(1).max(500)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Choose at least one batch item'});const c=await pool.connect();try{await c.query('BEGIN');const published=[];const skipped=[];for(const id of p.data.item_ids){const x=(await c.query('SELECT * FROM batch_items WHERE id=$1 AND batch_id=$2 FOR UPDATE',[id,req.params.id])).rows[0];if(!x){skipped.push({id,reason:'not found'});continue}if(!x.title?.trim()||x.price_cents==null){skipped.push({id,reason:'title and price required'});continue}if(['Firearms','Ammunition'].includes(x.category)){skipped.push({id,reason:'regulated items require manual inventory review'});continue}const inv=(await c.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible) VALUES($1,$2,$3,0,$4,NULL,NULL,$5,1,$6,$7,$8,$9,NULL,false,false,true) RETURNING id,title`,[x.title.trim(),x.category||'Other',x.quantity||1,x.price_cents,(x.quantity||1)>1?'quantity':'individual',x.notes||'',x.image_data,JSON.stringify([x.image_data]),x.condition||'Good'])).rows[0];await c.query("UPDATE batch_items SET status='published',inventory_id=$1,updated_at=now() WHERE id=$2",[inv.id,x.id]);published.push(inv)}await c.query(`UPDATE batch_uploads SET status=CASE WHEN NOT EXISTS(SELECT 1 FROM batch_items WHERE batch_id=$1 AND status<>'published') THEN 'published' ELSE 'review' END,updated_at=now() WHERE id=$1`,[req.params.id]);await c.query('COMMIT');res.json({published,skipped})}catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e);res.status(500).json({error:'Could not publish batch inventory'})}finally{c.release()}});
+
+
+// ---------- YEAR-END SALES / TAX REPORTING ----------
+app.get('/api/reports/year-end',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const year=Number.parseInt(String(req.query.year||new Date().getFullYear()),10);
+    if(!Number.isInteger(year)||year<2000||year>2100)return res.status(400).json({error:'Invalid report year'});
+    const start=`${year}-01-01T00:00:00.000Z`,end=`${year+1}-01-01T00:00:00.000Z`;
+    const online=(await pool.query(`SELECT id,order_number,created_at,customer_name,customer_email,fulfillment,shipping_address,subtotal_cents,shipping_cents,tax_cents,total_cents,payment_status,order_status,tax_state,tax_rate_bps_snapshot,refunded_cents,refunded_tax_cents,refunded_at FROM orders WHERE created_at >= $1 AND created_at < $2 ORDER BY created_at`,[start,end])).rows;
+    const manual=(await pool.query(`SELECT id,created_at,item_title,quantity,gross_cents,tax_cents,cost_cents,payment_method,order_ref FROM sales WHERE created_at >= $1 AND created_at < $2 ORDER BY created_at`,[start,end])).rows;
+    const paidOnline=online.filter(o=>o.payment_status==='paid');
+    const fullyRefunded=online.filter(o=>o.payment_status==='refunded');
+    const recognizedOnline=online.filter(o=>o.payment_status==='paid'||o.payment_status==='refunded');
+    const onlineSubtotal=recognizedOnline.reduce((a,o)=>a+Number(o.subtotal_cents||0),0);
+    const onlineShipping=recognizedOnline.reduce((a,o)=>a+Number(o.shipping_cents||0),0);
+    const onlineTax=recognizedOnline.reduce((a,o)=>a+Number(o.tax_cents||0),0);
+    const onlineTotal=recognizedOnline.reduce((a,o)=>a+Number(o.total_cents||0),0);
+    const refundedTotal=online.reduce((a,o)=>a+Number(o.refunded_cents||0)+(o.payment_status==='refunded'&&!Number(o.refunded_cents||0)?Number(o.total_cents||0):0),0);
+    const refundedTax=online.reduce((a,o)=>a+Number(o.refunded_tax_cents||0)+(o.payment_status==='refunded'&&!Number(o.refunded_tax_cents||0)?Number(o.tax_cents||0):0),0);
+    const manualGross=manual.reduce((a,x)=>a+Number(x.gross_cents||0),0);
+    const manualTax=manual.reduce((a,x)=>a+Number(x.tax_cents||0),0);
+    const manualCost=manual.reduce((a,x)=>a+Number(x.cost_cents||0),0);
+    const monthly={};
+    for(let m=1;m<=12;m++)monthly[String(m).padStart(2,'0')]={month:m,online_sales_cents:0,online_tax_cents:0,manual_sales_cents:0,manual_tax_cents:0,refunds_cents:0};
+    for(const o of recognizedOnline){const k=String(new Date(o.created_at).getUTCMonth()+1).padStart(2,'0');monthly[k].online_sales_cents+=Number(o.subtotal_cents||0)+Number(o.shipping_cents||0);monthly[k].online_tax_cents+=Number(o.tax_cents||0);monthly[k].refunds_cents+=Number(o.refunded_cents||0)+(o.payment_status==='refunded'&&!Number(o.refunded_cents||0)?Number(o.total_cents||0):0)}
+    for(const x of manual){const k=String(new Date(x.created_at).getUTCMonth()+1).padStart(2,'0');monthly[k].manual_sales_cents+=Number(x.gross_cents||0);monthly[k].manual_tax_cents+=Number(x.tax_cents||0)}
+    const states={};
+    for(const o of recognizedOnline){const addr=o.shipping_address||{};const st=String(o.tax_state||(o.fulfillment==='pickup'?'KY':addr.state)||'UNKNOWN').toUpperCase();if(!states[st])states[st]={state:st,orders:0,sales_cents:0,tax_cents:0,refunds_cents:0};states[st].orders++;states[st].sales_cents+=Number(o.subtotal_cents||0)+Number(o.shipping_cents||0);states[st].tax_cents+=Number(o.tax_cents||0);states[st].refunds_cents+=Number(o.refunded_cents||0)+(o.payment_status==='refunded'&&!Number(o.refunded_cents||0)?Number(o.total_cents||0):0)}
+    res.json({year,generated_at:new Date().toISOString(),summary:{online_order_count:online.length,paid_online_count:paidOnline.length,refunded_online_count:fullyRefunded.length,pending_online_count:online.filter(o=>o.payment_status==='pending').length,cancelled_online_count:online.filter(o=>o.order_status==='cancelled'||o.payment_status==='cancelled').length,online_subtotal_cents:onlineSubtotal,online_shipping_cents:onlineShipping,online_tax_collected_cents:onlineTax,online_total_cents:onlineTotal,refunds_cents:refundedTotal,refunded_tax_cents:refundedTax,manual_sale_count:manual.length,manual_sales_cents:manualGross,manual_tax_cents:manualTax,manual_cost_cents:manualCost,manual_estimated_profit_cents:manualGross-manualCost,combined_sales_before_tax_cents:onlineSubtotal+onlineShipping+manualGross,combined_tax_collected_cents:onlineTax+manualTax,combined_refunds_cents:refundedTotal},monthly:Object.values(monthly),states:Object.values(states).sort((a,b)=>a.state.localeCompare(b.state)),online_orders:online,manual_sales:manual,notes:['This report is an operational bookkeeping aid, not a filed tax return.','Pending/cancelled orders are shown in counts but are not included in recognized online sales totals.','Older online orders may not have a stored tax-rate snapshot; use the saved tax amount as the historical source of truth.']});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not build year-end report'})}
+});
 
 app.get('/api/audit',auth,requireRole('admin'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,user_id,action,entity_type,entity_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 500');res.json(rows);});
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).json({error:'Internal server error'});});
