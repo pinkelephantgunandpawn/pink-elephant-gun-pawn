@@ -10,6 +10,7 @@ import { z } from 'zod';
 import nodemailer from 'nodemailer';
 import multer from 'multer';
 import * as XLSX from 'xlsx';
+import csvParser from 'csv-parser';
 import ExcelJS from 'exceljs';
 import os from 'node:os';
 import zipcodes from 'zipcodes';
@@ -573,8 +574,13 @@ function atfDealerFromRow(row){
   let postal=firstField(norm,['PREMISE_ZIP_CODE','PREMISE_ZIP','PREMISES_ZIP_CODE','ZIP_CODE','ZIP']);postal=postal.replace(/\.0$/,'').padStart(5,'0');
   if(!name||!address1||!city||!state||postal.length<5)return null;
   const zip5=postal.slice(0,5),z=zipcodes.lookup(zip5)||{};
-  const lic=firstField(norm,['FFL_NUMBER','LICENSE_NUMBER','LIC_NUMBER','LIC_NO']);
-  return {name,address1,city,state,postal:zip5,license_type:type||null,source_license_number:lic||null,latitude:Number.isFinite(z.latitude)?z.latitude:null,longitude:Number.isFinite(z.longitude)?z.longitude:null};
+  let lic=firstField(norm,['FFL_NUMBER','LICENSE_NUMBER','LIC_NUMBER','LIC_NO']);
+  if(!lic){
+    const parts=['LIC_REGN','LIC_DIST','LIC_CNTY','LIC_TYPE','LIC_XPRDTE','LIC_SEQN'].map(k=>firstField(norm,[k]));
+    if(parts.every(Boolean))lic=parts.join('-');
+  }
+  const phone=firstField(norm,['VOICE_PHONE','PHONE','TELEPHONE']);
+  return {name,address1,city,state,postal:zip5,phone:phone||null,license_type:type||null,source_license_number:lic||null,latitude:Number.isFinite(z.latitude)?z.latitude:null,longitude:Number.isFinite(z.longitude)?z.longitude:null};
 }
 async function upsertAtfBatch(batch){
   let added=0,updated=0;
@@ -582,42 +588,36 @@ async function upsertAtfBatch(batch){
   try{
     await client.query('BEGIN');
     for(const d of batch){
-      const r=await client.query(`INSERT INTO ffl_dealers(name,address1,city,state,postal,active,latitude,longitude,source,source_license_number,license_type,source_updated_at)
-        VALUES($1,$2,$3,$4,$5,true,$6,$7,'ATF',$8,$9,now())
-        ON CONFLICT (source,name,address1,city,state,postal) DO UPDATE SET latitude=COALESCE(EXCLUDED.latitude,ffl_dealers.latitude),longitude=COALESCE(EXCLUDED.longitude,ffl_dealers.longitude),source_license_number=COALESCE(EXCLUDED.source_license_number,ffl_dealers.source_license_number),license_type=COALESCE(EXCLUDED.license_type,ffl_dealers.license_type),active=true,source_updated_at=now(),updated_at=now() RETURNING (xmax = 0) AS inserted`,[d.name,d.address1,d.city,d.state,d.postal,d.latitude,d.longitude,d.source_license_number,d.license_type]);
+      const r=await client.query(`INSERT INTO ffl_dealers(name,address1,city,state,postal,phone,active,latitude,longitude,source,source_license_number,license_type,source_updated_at)
+        VALUES($1,$2,$3,$4,$5,$6,true,$7,$8,'ATF',$9,$10,now())
+        ON CONFLICT (source,name,address1,city,state,postal) DO UPDATE SET phone=COALESCE(EXCLUDED.phone,ffl_dealers.phone),latitude=COALESCE(EXCLUDED.latitude,ffl_dealers.latitude),longitude=COALESCE(EXCLUDED.longitude,ffl_dealers.longitude),source_license_number=COALESCE(EXCLUDED.source_license_number,ffl_dealers.source_license_number),license_type=COALESCE(EXCLUDED.license_type,ffl_dealers.license_type),active=true,source_updated_at=now(),updated_at=now() RETURNING (xmax = 0) AS inserted`,[d.name,d.address1,d.city,d.state,d.postal,d.phone,d.latitude,d.longitude,d.source_license_number,d.license_type]);
       if(r.rows[0]?.inserted)added++;else updated++;
     }
     await client.query('COMMIT');return {added,updated};
   }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
 }
-async function importAtfXlsxStream(filePath){
-  const reader=new ExcelJS.stream.xlsx.WorkbookReader(filePath,{entries:'emit',sharedStrings:'cache',styles:'ignore',worksheets:'emit',hyperlinks:'ignore'});
-  let headers=null,batch=[],rows=0,added=0,updated=0,seenSheet=false;
-  for await(const worksheet of reader){
-    if(seenSheet)break;seenSheet=true;
-    for await(const row of worksheet){
-      const vals=Array.isArray(row.values)?row.values.slice(1):[];
-      if(!headers){headers=vals.map(v=>String(v??'').trim());continue}
-      const obj={};headers.forEach((h,i)=>{if(h)obj[h]=vals[i]??''});
-      const d=atfDealerFromRow(obj);if(!d)continue;
-      batch.push(d);rows++;
-      if(batch.length>=250){const r=await upsertAtfBatch(batch);added+=r.added;updated+=r.updated;batch=[]}
-    }
+async function importAtfCsvStream(filePath){
+  let batch=[],rows=0,added=0,updated=0;
+  const stream=fs.createReadStream(filePath).pipe(csvParser({mapHeaders:({header})=>String(header||'').replace(/^\uFEFF/,'').trim()}));
+  for await(const row of stream){
+    const d=atfDealerFromRow(row);if(!d)continue;
+    batch.push(d);rows++;
+    if(batch.length>=250){const r=await upsertAtfBatch(batch);added+=r.added;updated+=r.updated;batch=[]}
   }
   if(batch.length){const r=await upsertAtfBatch(batch);added+=r.added;updated+=r.updated}
   return {rows,added,updated};
 }
 app.post('/api/ffl-dealers/import-atf',auth,requireRole('manager'),atfUpload.single('file'),async(req,res)=>{
-  if(!req.file)return res.status(400).json({error:'Choose an official ATF .xlsx file first.'});
+  if(!req.file)return res.status(400).json({error:'Choose the official ATF complete FFL .csv file first.'});
   const filePath=req.file.path;
   try{
     const ext=path.extname(req.file.originalname||'').toLowerCase();
-    if(ext!=='.xlsx')return res.status(400).json({error:'For the national ATF directory, upload the official .xlsx file. This streaming importer avoids server memory crashes.'});
-    const result=await importAtfXlsxStream(filePath);
-    if(!result.rows)return res.status(400).json({error:'No usable FFL dealer rows were found. Use the official ATF complete FFL .xlsx listing.'});
+    if(ext!=='.csv')return res.status(400).json({error:'Upload the official ATF complete FFL .csv file.'});
+    const result=await importAtfCsvStream(filePath);
+    if(!result.rows)return res.status(400).json({error:'No usable FFL dealer rows were found in the ATF CSV.'});
     await audit(req,'IMPORT','ffl_dealers',null,{source:'ATF',...result,file:req.file.originalname});
     res.json({ok:true,...result});
-  }catch(e){console.error('ATF FFL streaming import error',e);res.status(500).json({error:'Could not import the ATF dealer file. Check Render logs for ATF FFL streaming import error.'})}
+  }catch(e){console.error('ATF FFL CSV streaming import error',e);res.status(500).json({error:'Could not import the ATF dealer CSV. Check Render logs for ATF FFL CSV streaming import error.'})}
   finally{if(filePath)fs.unlink(filePath).catch(()=>{})}
 });
 app.get('/api/ffl-dealers/import-status',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query(`SELECT count(*)::int AS total,max(source_updated_at) AS last_import FROM ffl_dealers WHERE source='ATF'`);res.json(rows[0])});
