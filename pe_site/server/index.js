@@ -9,7 +9,6 @@ import pg from 'pg';
 import { z } from 'zod';
 import nodemailer from 'nodemailer';
 import multer from 'multer';
-import * as XLSX from 'xlsx';
 import csvParser from 'csv-parser';
 import os from 'node:os';
 import zipcodes from 'zipcodes';
@@ -20,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 const { Pool } = pg;
 const app = express();
+app.disable('x-powered-by');
 const port = Number(process.env.PORT || 8080);
 
 async function ensureBootstrapAdmin(){
@@ -49,9 +49,12 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '6mb' }));
+app.use('/api', (_req,res,next)=>{res.set('Cache-Control','no-store');next()});
 app.use(rateLimit({ windowMs: 15*60*1000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false }));
-const loginLimit = rateLimit({ windowMs: 15*60*1000, limit: 10, message: { error:'Too many login attempts. Try again later.' } });
-const checkoutLimit = rateLimit({ windowMs: 15*60*1000, limit: 12, message: { error:'Too many checkout attempts. Try again shortly.' } });
+const loginLimit = rateLimit({ windowMs: 15*60*1000, limit: 10, standardHeaders:'draft-8', legacyHeaders:false, message: { error:'Too many login attempts. Try again later.' } });
+const customerLoginLimit = rateLimit({ windowMs: 15*60*1000, limit: 10, standardHeaders:'draft-8', legacyHeaders:false, message: { error:'Too many sign-in attempts. Try again later.' } });
+const registerLimit = rateLimit({ windowMs: 60*60*1000, limit: 6, standardHeaders:'draft-8', legacyHeaders:false, message: { error:'Too many account creation attempts. Try again later.' } });
+const checkoutLimit = rateLimit({ windowMs: 15*60*1000, limit: 12, standardHeaders:'draft-8', legacyHeaders:false, message: { error:'Too many checkout attempts. Try again shortly.' } });
 
 function taxConfig(){
   const taxableStates=String(process.env.TAXABLE_STATES||'KY').split(',').map(x=>x.trim().toUpperCase()).filter(Boolean);
@@ -123,7 +126,7 @@ const requireRole=min => (req,res,next)=> roles[req.user?.role] >= roles[min] ? 
 
 app.get('/health', async (_req,res)=>{ try{await pool.query('SELECT 1'); res.json({ok:true});}catch{res.status(503).json({ok:false});} });
 app.post('/api/auth/login', loginLimit, async (req,res)=>{
-  const body=z.object({email:z.string().email(),password:z.string().min(8)}).safeParse(req.body);
+  const body=z.object({email:z.string().email().max(254),password:z.string().min(8).max(200)}).safeParse(req.body);
   if(!body.success) return res.status(400).json({error:'Valid email and password are required'});
   const {rows}=await pool.query('SELECT id,email,password_hash,role,active FROM users WHERE lower(email)=lower($1)',[body.data.email]);
   const u=rows[0];
@@ -343,14 +346,14 @@ const customerAuth=(req,res,next)=>{
   }catch(e){return res.status(401).json({error:'Invalid or expired customer session'})}
 };
 
-app.post('/api/public/customer/register',async(req,res)=>{
+app.post('/api/public/customer/register',registerLimit,async(req,res)=>{
   try{
-    const email=String(req.body?.email||'').trim().toLowerCase();
-    const password=String(req.body?.password||'');
-    const name=String(req.body?.name||'').trim();
-    const phone=String(req.body?.phone||'').trim();
-    if(!email||!email.includes('@'))return res.status(400).json({error:'Valid email required'});
-    if(password.length<8)return res.status(400).json({error:'Password must be at least 8 characters'});
+    const parsed=z.object({email:z.string().email().max(254),password:z.string().min(8).max(200),name:z.string().trim().max(120).optional().default(''),phone:z.string().trim().max(40).optional().default('')}).safeParse(req.body||{});
+    if(!parsed.success)return res.status(400).json({error:'Please enter a valid email and a password of at least 8 characters.'});
+    const email=parsed.data.email.trim().toLowerCase();
+    const password=parsed.data.password;
+    const name=parsed.data.name;
+    const phone=parsed.data.phone;
     const exists=await pool.query('select id from customers where email=$1',[email]);
     if(exists.rowCount)return res.status(409).json({error:'An account already exists for that email'});
     const hash=await bcrypt.hash(password,12);
@@ -365,10 +368,12 @@ app.post('/api/public/customer/register',async(req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:'Could not create account'})}
 });
 
-app.post('/api/public/customer/login',async(req,res)=>{
+app.post('/api/public/customer/login',customerLoginLimit,async(req,res)=>{
   try{
-    const email=String(req.body?.email||'').trim().toLowerCase();
-    const password=String(req.body?.password||'');
+    const parsed=z.object({email:z.string().email().max(254),password:z.string().min(1).max(200)}).safeParse(req.body||{});
+    if(!parsed.success)return res.status(400).json({error:'Valid email and password are required'});
+    const email=parsed.data.email.trim().toLowerCase();
+    const password=parsed.data.password;
     const q=await pool.query('select * from customers where email=$1',[email]);
     if(!q.rowCount)return res.status(401).json({error:'Invalid email or password'});
     const c=q.rows[0];
