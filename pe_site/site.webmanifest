@@ -1,0 +1,15 @@
+{
+  "name": "Pink Elephant Gun & Pawn",
+  "short_name": "Pink Elephant",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#070707",
+  "theme_color": "#e86aa7",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
