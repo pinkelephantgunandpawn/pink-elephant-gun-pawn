@@ -333,3 +333,10 @@ CREATE INDEX IF NOT EXISTS ffl_dealers_postal_idx ON ffl_dealers(active,postal);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_provider text;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_reference text;
 CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_provider_reference_uq ON orders(payment_provider,payment_reference) WHERE payment_provider IS NOT NULL AND payment_reference IS NOT NULL;
+
+-- PAYPAL REFUND / RECONCILIATION FIELDS
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS paypal_capture_id text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS paypal_refund_id text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_status text;
+CREATE INDEX IF NOT EXISTS orders_paypal_capture_idx ON orders(paypal_capture_id);
+CREATE INDEX IF NOT EXISTS orders_paypal_refund_idx ON orders(paypal_refund_id);
