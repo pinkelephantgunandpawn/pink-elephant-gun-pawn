@@ -226,6 +226,46 @@ async function verifyShippoRate(rateId,shipmentId){
   return {cents,provider:j.provider||'',service:j.servicelevel?.name||j.servicelevel?.token||'Shipping',rate_id:j.object_id,shipment_id:j.shipment||shipmentId||null,test:!!j.test};
 }
 
+
+function paypalMode(){return String(process.env.PAYPAL_MODE||'sandbox').trim().toLowerCase()==='live'?'live':'sandbox'}
+function paypalApiBase(){return paypalMode()==='live'?'https://api-m.paypal.com':'https://api-m.sandbox.paypal.com'}
+function paypalConfigured(){return !!(process.env.PAYPAL_CLIENT_ID&&process.env.PAYPAL_CLIENT_SECRET)}
+async function paypalAccessToken(){
+  if(!paypalConfigured())throw Object.assign(new Error('PayPal is not configured yet.'),{status:503});
+  const basic=Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`).toString('base64');
+  const r=await fetch(paypalApiBase()+'/v1/oauth2/token',{method:'POST',headers:{Authorization:'Basic '+basic,'Content-Type':'application/x-www-form-urlencoded'},body:'grant_type=client_credentials'});
+  const j=await r.json().catch(()=>({}));if(!r.ok||!j.access_token)throw Object.assign(new Error(j.error_description||'Could not connect to PayPal.'),{status:502});
+  return j.access_token;
+}
+async function paypalRequest(pathname,{method='GET',body=null,requestId=null}={}){
+  const token=await paypalAccessToken();
+  const headers={Authorization:'Bearer '+token,'Content-Type':'application/json'};if(requestId)headers['PayPal-Request-Id']=requestId;
+  const r=await fetch(paypalApiBase()+pathname,{method,headers,body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({}));if(!r.ok){const detail=j?.details?.[0]?.description||j?.message||j?.name||'PayPal request failed.';const e=new Error(detail);e.status=502;e.paypal=j;throw e}return j;
+}
+function paypalBlockedItem(inv){
+  if(inv.regulated)return true;
+  const c=String(inv.category||'').toLowerCase();
+  return /(^|\b)(ammo|ammunition|firearm|firearms|gun|guns)(\b|$)/i.test(c);
+}
+async function pricePublicCheckout(payload,{lockClient=null}={}){
+  let verifiedShipping=null;
+  if(payload.fulfillment==='shipping')verifiedShipping=await verifyShippoRate(payload.shippo_rate_id,payload.shippo_shipment_id);
+  const q=lockClient||pool;let subtotal=0;const items=[];
+  for(const requested of payload.items){
+    const suffix=lockClient?' FOR UPDATE':'';
+    const inv=(await q.query('SELECT id,title,category,quantity,price_cents,sale_price_cents,regulated,public_visible FROM inventory WHERE id=$1'+suffix,[requested.inventory_id])).rows[0];
+    if(!inv||!inv.public_visible){const e=new Error('An item in your cart is no longer available.');e.status=409;throw e}
+    if(paypalBlockedItem(inv)){const e=new Error('PayPal checkout is not available for firearms or ammunition.');e.status=400;throw e}
+    const unit=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);
+    if(unit==null){const e=new Error(`${inv.title} requires store pricing.`);e.status=400;throw e}
+    if(inv.quantity<requested.quantity){const e=new Error(`Not enough ${inv.title} is available.`);e.status=409;throw e}
+    const line=unit*requested.quantity;subtotal+=line;items.push({inv,unit,quantity:requested.quantity,line});
+  }
+  const shippingCents=verifiedShipping?.cents||0;
+  const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents,state:payload.shipping?.state,fulfillment:payload.fulfillment});
+  return {items,subtotal,shippingCents,tax,total:subtotal+shippingCents+tax.tax_cents,verifiedShipping};
+}
 const publicOrderSchema=z.object({
   customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40)}),
   fulfillment:z.enum(['pickup','shipping']),
@@ -344,7 +384,78 @@ app.get('/api/customer/orders',customerAuth,async(req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:'Could not load orders'})}
 });
 
+
+app.get('/api/public/paypal/config',(_req,res)=>{
+  if(!paypalConfigured())return res.status(503).json({enabled:false,error:'PayPal is not configured.'});
+  res.json({enabled:true,client_id:process.env.PAYPAL_CLIENT_ID,mode:paypalMode(),currency:'USD'});
+});
+
+app.post('/api/public/paypal/create-order',checkoutLimit,async(req,res)=>{
+  const p=publicOrderSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Please check the checkout information and try again.'});
+  if(p.data.fulfillment==='shipping'&&!p.data.shipping)return res.status(400).json({error:'Shipping address is required.'});
+  if(p.data.fulfillment==='shipping'&&!p.data.shippo_rate_id)return res.status(400).json({error:'Choose a shipping rate before paying.'});
+  try{
+    const priced=await pricePublicCheckout(p.data);
+    const value=(priced.total/100).toFixed(2);
+    const j=await paypalRequest('/v2/checkout/orders',{method:'POST',requestId:'pe-create-'+Date.now()+'-'+Math.random().toString(36).slice(2),body:{intent:'CAPTURE',purchase_units:[{description:'Pink Elephant Gun & Pawn merchandise order',amount:{currency_code:'USD',value,breakdown:{item_total:{currency_code:'USD',value:(priced.subtotal/100).toFixed(2)},shipping:{currency_code:'USD',value:(priced.shippingCents/100).toFixed(2)},tax_total:{currency_code:'USD',value:(priced.tax.tax_cents/100).toFixed(2)}}}}]}});
+    res.json({id:j.id,total_cents:priced.total,mode:paypalMode()});
+  }catch(e){console.error('PAYPAL CREATE',e);res.status(e.status||500).json({error:e.message||'Could not start PayPal checkout.'})}
+});
+
+app.post('/api/public/paypal/capture-order',checkoutLimit,async(req,res)=>{
+  const schema=publicOrderSchema.extend({paypal_order_id:z.string().trim().min(8).max(80)});const p=schema.safeParse(req.body);
+  if(!p.success)return res.status(400).json({error:'Invalid PayPal checkout information.'});
+  const paypalOrderId=p.data.paypal_order_id;const payload={...p.data};delete payload.paypal_order_id;
+  try{
+    const existing=(await pool.query("SELECT * FROM orders WHERE payment_provider='paypal' AND payment_reference=$1",[paypalOrderId])).rows[0];
+    if(existing&&existing.payment_status==='paid')return res.json({order_number:existing.order_number,total_cents:existing.total_cents,payment_status:'paid',paypal_order_id:paypalOrderId});
+    const pp=await paypalRequest('/v2/checkout/orders/'+encodeURIComponent(paypalOrderId));
+    const expectedValue=pp?.purchase_units?.[0]?.amount?.value;const expectedCurrency=pp?.purchase_units?.[0]?.amount?.currency_code;
+    if(existing){
+      if(expectedCurrency!=='USD'||Math.round(Number(expectedValue)*100)!==Number(existing.total_cents))return res.status(409).json({error:'The PayPal total does not match this order.'});
+      let done=pp;
+      if(pp.status!=='COMPLETED')done=await paypalRequest('/v2/checkout/orders/'+encodeURIComponent(paypalOrderId)+'/capture',{method:'POST',requestId:'pe-capture-'+paypalOrderId});
+      if(done?.status!=='COMPLETED')return res.status(409).json({error:'PayPal did not complete the payment.'});
+      const updated=(await pool.query("UPDATE orders SET payment_status='paid',paid_at=COALESCE(paid_at,now()),updated_at=now() WHERE id=$1 RETURNING *",[existing.id])).rows[0];
+      sendOrderConfirmation(updated.id).catch(console.error);
+      return res.json({order_number:updated.order_number,total_cents:updated.total_cents,payment_status:'paid',paypal_order_id:paypalOrderId});
+    }
+    const priced=await pricePublicCheckout(payload);
+    if(expectedCurrency!=='USD'||Math.round(Number(expectedValue)*100)!==priced.total)return res.status(409).json({error:'The order total changed before payment. Please reopen checkout and try again.'});
+
+    let local=null;
+    if(!local){
+      let checkoutCustomerId=null;try{const raw=req.headers.authorization||'';if(raw.startsWith('Bearer ')){const data=jwt.verify(raw.slice(7),process.env.JWT_SECRET);if(data.type==='customer'&&data.customer_id)checkoutCustomerId=Number(data.customer_id)}}catch(_){}
+      const c=await pool.connect();
+      try{
+        await c.query('BEGIN');const locked=await pricePublicCheckout(payload,{lockClient:c});
+        if(locked.total!==priced.total){const e=new Error('The order total changed before payment. Please try again.');e.status=409;throw e}
+        const orderNumber='PE-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
+        const shippingAddress=payload.fulfillment==='shipping'?payload.shipping:null;
+        local=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service,customer_id,tax_state,tax_rate_bps_snapshot,payment_provider,payment_reference,payment_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending') RETURNING *`,[orderNumber,payload.customer.name,payload.customer.email.toLowerCase(),payload.customer.phone,payload.fulfillment,shippingAddress,payload.notes,locked.subtotal,locked.tax.tax_cents,locked.shippingCents,locked.total,locked.verifiedShipping?.rate_id||null,locked.verifiedShipping?.shipment_id||null,locked.verifiedShipping?.provider||null,locked.verifiedShipping?.service||null,checkoutCustomerId,locked.tax.state||null,locked.tax.rate_bps??null,'paypal',paypalOrderId])).rows[0];
+        for(const item of locked.items){await c.query(`INSERT INTO order_items(order_id,inventory_id,item_title,quantity,unit_price_cents,line_total_cents) VALUES($1,$2,$3,$4,$5,$6)`,[local.id,item.inv.id,item.inv.title,item.quantity,item.unit,item.line]);await c.query('UPDATE inventory SET quantity=quantity-$1,updated_at=now() WHERE id=$2',[item.quantity,item.inv.id])}
+        await c.query('COMMIT');
+      }catch(e){try{await c.query('ROLLBACK')}catch{};throw e}finally{c.release()}
+    }
+
+    let captured;
+    try{captured=await paypalRequest('/v2/checkout/orders/'+encodeURIComponent(paypalOrderId)+'/capture',{method:'POST',requestId:'pe-capture-'+paypalOrderId})}
+    catch(captureErr){
+      const check=await paypalRequest('/v2/checkout/orders/'+encodeURIComponent(paypalOrderId)).catch(()=>null);
+      if(check?.status==='COMPLETED')captured=check;else{
+        const c=await pool.connect();try{await c.query('BEGIN');const o=(await c.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE',[local.id])).rows[0];if(o&&o.payment_status!=='paid'&&!o.inventory_restocked){const its=(await c.query('SELECT inventory_id,quantity FROM order_items WHERE order_id=$1',[o.id])).rows;for(const it of its){if(it.inventory_id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[it.quantity,it.inventory_id])}await c.query("UPDATE orders SET order_status='cancelled',payment_status='cancelled',inventory_restocked=true,cancelled_at=now(),updated_at=now() WHERE id=$1",[o.id])}await c.query('COMMIT')}catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e)}finally{c.release()}
+        throw captureErr;
+      }
+    }
+    const status=captured?.status||'';if(status!=='COMPLETED')throw Object.assign(new Error('PayPal did not complete the payment.'),{status:409});
+    const updated=(await pool.query("UPDATE orders SET payment_status='paid',paid_at=COALESCE(paid_at,now()),updated_at=now() WHERE id=$1 RETURNING *",[local.id])).rows[0];
+    sendOrderConfirmation(updated.id).catch(console.error);
+    res.json({order_number:updated.order_number,total_cents:updated.total_cents,payment_status:'paid',paypal_order_id:paypalOrderId});
+  }catch(e){console.error('PAYPAL CAPTURE',e);res.status(e.status||500).json({error:e.message||'Could not complete PayPal payment.'})}
+});
+
 app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
+  if(String(process.env.ALLOW_UNPAID_ORDERS||'false').toLowerCase()!=='true')return res.status(410).json({error:'Unpaid order checkout is disabled. Please use PayPal checkout.'});
   let checkoutCustomerId=null;
   try{
     const raw=req.headers.authorization||'';
