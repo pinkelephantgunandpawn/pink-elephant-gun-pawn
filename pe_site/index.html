@@ -90,16 +90,36 @@ footer{background:#050506}.policyLinks{justify-content:center!important}
 </style>
 <script id="peCategoryJump2026">
 document.addEventListener("DOMContentLoaded",()=>{
+  const params=new URLSearchParams(location.search);
+  const category=params.get("category");
+
   document.querySelectorAll(".peCatCard").forEach(btn=>{
     btn.addEventListener("click",()=>{
-      const wanted=(btn.dataset.cat||"").toLowerCase();
-      const buttons=[...document.querySelectorAll("#filters button")];
-      const match=buttons.find(b=>(b.textContent||"").toLowerCase().includes(wanted) ||
-        (wanted==="ammunition" && (b.textContent||"").toLowerCase().includes("ammo")));
-      if(match){match.click();}
-      document.getElementById("inventory")?.scrollIntoView({behavior:"smooth"});
+      const wanted=btn.dataset.cat||"";
+      location.href="/?category="+encodeURIComponent(wanted)+"#inventory";
     });
   });
+
+  if(category){
+    document.body.classList.add("peCategoryPage");
+
+    const title=document.querySelector("#inventory .head h2");
+    if(title) title.textContent=category.toUpperCase();
+
+    const buttons=[...document.querySelectorAll("#filters button")];
+    const wanted=category.toLowerCase();
+    const match=buttons.find(b=>{
+      const t=(b.textContent||"").trim().toLowerCase();
+      return t===wanted ||
+        (wanted==="ammunition" && (t==="ammo" || t==="ammunition")) ||
+        (wanted==="accessories" && t.includes("access"));
+    });
+    if(match) setTimeout(()=>match.click(),150);
+
+    setTimeout(()=>{
+      document.getElementById("inventory")?.scrollIntoView({block:"start"});
+    },200);
+  }
 });
 </script>
 
@@ -117,6 +137,29 @@ document.addEventListener("DOMContentLoaded",()=>{
   inset:0;
   background:linear-gradient(180deg,rgba(0,0,0,.02),rgba(0,0,0,.28));
   pointer-events:none;
+}
+</style>
+
+
+<style id="peCategoryPageMode2026">
+body.peCategoryPage .peHero,
+body.peCategoryPage .peTrustBar,
+body.peCategoryPage .peCategoryBand,
+body.peCategoryPage .cta,
+body.peCategoryPage #services,
+body.peCategoryPage #firearms,
+body.peCategoryPage #contact{
+  display:none!important;
+}
+body.peCategoryPage #inventory{
+  padding-top:34px!important;
+  min-height:70vh;
+}
+body.peCategoryPage #inventory .head{
+  margin-bottom:22px;
+}
+body.peCategoryPage #inventory .head h2{
+  font-size:30px;
 }
 </style>
 
