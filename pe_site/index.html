@@ -18,7 +18,7 @@
 @media(max-width:650px){.deliveryChoice{grid-template-columns:1fr}.dealerSearch{display:grid}}
 </style>
 <style id="storeQolStyles">
-.newBadge{display:inline-block;background:#173722;color:#b8ffd0;border-radius:999px;padding:4px 7px;font-size:10px;font-weight:900;margin-left:5px}.lowBadge{display:inline-block;background:#4a3d17;color:#ffe6a1;border-radius:999px;padding:4px 7px;font-size:10px;font-weight:900;margin-left:5px}.accountGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.acctCard{border:1px solid #333;border-radius:12px;padding:14px;background:#0c0c0f}.acctCard h3{margin-top:0}.bravoFuture{border:1px dashed #5b5b66;border-radius:12px;padding:14px;background:#0b0b0e}.lookupBox{width:min(650px,100%)}.lookupResult{margin-top:12px}.statusTrack{display:flex;gap:5px;flex-wrap:wrap;margin:8px 0}.statusTrack span{padding:5px 7px;border-radius:6px;background:#292930;font-size:10px;font-weight:900}.statusTrack .on{background:var(--p);color:#16070f}
+.newBadge{display:inline-block;background:#173722;color:#b8ffd0;border-radius:999px;padding:4px 7px;font-size:10px;font-weight:900;margin-left:5px}.lowBadge{display:inline-block;background:#4a3d17;color:#ffe6a1;border-radius:999px;padding:4px 7px;font-size:10px;font-weight:900;margin-left:5px}.accountGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.acctCard{border:1px solid #333;border-radius:12px;padding:14px;background:#0c0c0f}.acctCard h3{margin-top:0}.mobilePawnFuture{border:1px dashed #5b5b66;border-radius:12px;padding:14px;background:#0b0b0e}.lookupBox{width:min(650px,100%)}.lookupResult{margin-top:12px}.statusTrack{display:flex;gap:5px;flex-wrap:wrap;margin:8px 0}.statusTrack span{padding:5px 7px;border-radius:6px;background:#292930;font-size:10px;font-weight:900}.statusTrack .on{background:var(--p);color:#16070f}
 @media(max-width:700px){.accountGrid{grid-template-columns:1fr}}
 </style>
 </meta><style>
@@ -275,7 +275,7 @@ fetch(API+'/api/public/inventory').then(r=>r.ok?r.json():Promise.reject()).then(
 <div id="peProfile"></div>
 <div class="accountGrid" style="margin-top:12px">
 <div class="acctCard"><h3>Profile &amp; Saved Address</h3><form id="peProfileForm"><input name="name" placeholder="Full name"/><input name="phone" placeholder="Phone"/><input name="address1" placeholder="Street address"/><input name="address2" placeholder="Apt / suite (optional)"/><input name="city" placeholder="City"/><input name="state" placeholder="State"/><input name="postal" placeholder="ZIP"/><button class="btn" type="submit">SAVE PROFILE</button></form><div class="smallNote" id="peProfileMsg"></div></div>
-<div class="acctCard"><h3>Pawn &amp; Layaway Payments</h3><div class="bravoFuture"><b>MobilePawn customer services</b><div class="smallNote">This area is prepared to connect your Pink Elephant account with MobilePawn for pawn and layaway balances/payments when the store enables the final MobilePawn link or account integration.</div><button class="btn pePawnBtn disabled" id="peMobilePawnBtn" type="button" onclick="peOpenMobilePawn()">MOBILEPAWN — COMING SOON</button><div class="peServiceNote smallNote">Your Pink Elephant shopping account remains separate until Bravo provides a secure customer-linking method. We will not automatically merge accounts without verified integration support.</div><div class="smallNote" id="peBravoStatus" style="margin-top:8px"></div></div></div>
+<div class="acctCard"><h3>Pawn &amp; Layaway Payments</h3><div class="mobilePawnFuture"><b>MobilePawn</b><div class="smallNote">Use MobilePawn to manage your Pink Elephant pawn and layaway accounts.</div><a class="btn pePawnBtn" id="peMobilePawnBtn" href="https://play.google.com/store/apps/details?id=com.bravorevolution.instapawn" target="_blank" rel="noopener" onclick="return openMobilePawnDownload(event)">OPEN MOBILEPAWN APP</a><div class="peServiceNote smallNote">Pay on your pawns and layaways through MobilePawn.</div></div></div>
 </div>
 <h3>Your Orders &amp; Tracking</h3><div id="peOrders"></div>
 <button class="btn" onclick="peLogout()">SIGN OUT</button>
@@ -298,7 +298,6 @@ async function peLoadAccount(){
     const me=await mr.json(),orders=or.ok?await or.json():[];
     document.getElementById('peProfile').innerHTML=`<b>${esc(me.name||me.email)}</b><br><span class="smallNote">${esc(me.email)}${me.phone?' • '+esc(me.phone):''}</span>`;
     const pf=document.getElementById('peProfileForm');if(pf){['name','phone','address1','address2','city','state','postal'].forEach(k=>{if(pf.elements[k])pf.elements[k].value=me[k]||''})}
-    document.getElementById('peBravoStatus').textContent=me.bravo_link_status==='connected'?'Bravo account connected.':'Bravo: not connected yet.';
     document.getElementById('peOrders').innerHTML=orders.length?orders.map(o=>`<div class="peOrderMini"><div class="peOrderHead"><div><b>Order #${esc(o.order_number)}</b><div class="smallNote">${esc(o.fulfillment||'')} • ${new Date(o.created_at).toLocaleDateString()}</div></div><div class="peOrderTotal">${money(Number(o.total_cents||0))}</div></div><div class="statusTrack"><span class="${['new','confirmed','ready','shipped','completed'].includes(o.order_status)?'on':''}">RECEIVED</span><span class="${o.payment_status==='paid'?'on':''}">PAID</span><span class="${['ready','shipped','completed'].includes(o.order_status)?'on':''}">READY</span><span class="${['shipped','completed'].includes(o.order_status)?'on':''}">SHIPPED</span><span class="${o.order_status==='completed'?'on':''}">COMPLETE</span></div>${(o.items||[]).length?`<ul class="peOrderItems">${o.items.map(i=>`<li>${esc(i.title)} × ${i.quantity}${i.line_total_cents!=null?' — '+money(Number(i.line_total_cents)):''}</li>`).join('')}</ul>`:''}${o.order_status==='cancelled'?'<div class="smallNote" style="color:#ff9eaa"><b>Cancelled</b></div>':''}${o.tracking_number?`<div style="margin-top:8px">${o.tracking_url?`<a class="btn" href="${esc(o.tracking_url)}" target="_blank" rel="noopener">TRACK PACKAGE</a>`:`<span class="smallNote">Tracking: ${esc(o.tracking_number)}</span>`}</div>`:''}</div>`).join(''):'<div class="smallNote">No orders yet.</div>';
   }catch(e){peLogout();document.getElementById('peAcctMsg').textContent=e.message}
 }
@@ -316,9 +315,8 @@ document.getElementById('peProfileForm')?.addEventListener('submit',async e=>{
   document.getElementById('peProfileMsg').textContent=r.ok?'Profile saved.':(j.error||'Could not save profile');if(r.ok)peLoadAccount();
 });
 
-let peMobilePawnUrl=null;async function peLoadStoreConfig(){try{const r=await fetch(API+'/api/public/store-config');const c=await r.json();peMobilePawnUrl=c.mobilepawn_url||null;const b=document.getElementById('peMobilePawnBtn');if(b&&peMobilePawnUrl){b.textContent='OPEN MOBILEPAWN';b.classList.remove('disabled')}}catch(_){}}
-function peOpenMobilePawn(){if(!peMobilePawnUrl){alert('MobilePawn online payments are not connected yet. Please call Pink Elephant at (606) 506-5030 for pawn or layaway payment help.');return}window.open(peMobilePawnUrl,'_blank','noopener')}
-peLoadStoreConfig();
+
+
 function peLogout(){localStorage.removeItem('pe_customer_token');document.getElementById('peLoggedOut').style.display='block';document.getElementById('peLoggedIn').style.display='none'}
 </script>
 </body></html>
