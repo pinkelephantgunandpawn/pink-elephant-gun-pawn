@@ -43,7 +43,7 @@
 <div class="modal" id="offerModal" style="display:none;position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;padding:18px;background:rgba(0,0,0,.86);"><div class="modalBox"><button class="modalClose" onclick="closeOffer()" type="button">✕</button><div class="eyebrow">Make an offer</div><h2 id="offerItemTitle">Make an Offer</h2><p class="muted" id="offerAsk"></p><form id="offerForm"><input id="offerInventoryId" name="inventory_id" type="hidden"/><div class="formGrid"><label>Name<input name="name" required=""/></label><label>Email<input name="email" required="" type="email"/></label><label>Phone<input name="phone"/></label><label>Your offer ($)<input min="1" name="offer" required="" step="0.01" type="number"/></label><label class="full">Message (optional)<textarea maxlength="1000" name="message" placeholder="Anything you'd like us to know"></textarea></label></div><div class="smallNote" id="offerMsg"></div><button class="btn" style="width:100%;margin-top:12px" type="submit">SEND OFFER</button></form></div></div><div class="cartPanel" id="cartPanel">
 <div class="cartHead"><div><b style="font-size:22px">Your Cart</b><div class="smallNote">Non-regulated merchandise only in Step 1.</div></div><button class="iconBtn" onclick="closeCart()">✕</button></div>
 <div class="cartBody" id="cartBody"></div>
-<div class="cartFoot"><div class="cartTotal"><span>Subtotal</span><span id="cartSubtotal">$0.00</span></div><div class="smallNote">Shipping and sales tax are calculated at checkout. Card payment will be enabled when the merchant account is connected.</div><button class="btn" onclick="openCheckout()" style="width:100%;margin-top:12px">CHECKOUT</button></div>
+<div class="cartFoot"><div class="cartTotal"><span>Subtotal</span><span id="cartSubtotal">$0.00</span></div><div class="smallNote">Shipping and sales tax are calculated at checkout. Normal merchandise can be paid securely with PayPal.</div><button class="btn" onclick="openCheckout()" style="width:100%;margin-top:12px">CHECKOUT</button></div>
 </div>
 <div class="checkoutBack" id="checkoutModal" onclick="if(event.target===this)closeCheckout()">
 <div class="checkoutBox">
@@ -62,9 +62,9 @@
 <button class="quoteShipBtn" id="quoteShipBtn" onclick="loadShippingRates()" type="button">GET SHIPPING RATES</button>
 <div class="shippingRates" id="shippingRates"></div>
 <textarea class="full" maxlength="1000" name="notes" placeholder="Order notes (optional)"></textarea>
-<label class="full smallNote"><input required="" style="width:auto;margin-right:8px" type="checkbox"/> I understand this order is not paid yet. Shipping and tax shown above are included in the order total; card payment will be enabled when the merchant account is connected.</label>
+<div class="full smallNote" id="paypalCheckoutNote">Pay securely with PayPal. Firearms and ammunition are not eligible for PayPal checkout.</div>
 <div class="full checkoutMsg" id="checkoutMsg"></div>
-<button class="btn full" id="placeOrderBtn" type="submit">PLACE ORDER</button>
+<div class="full" id="paypal-button-container"></div>
 </form>
 </div>
 </div>
@@ -162,7 +162,7 @@ function toggleShipping(){
 }
 function renderCheckoutSummary(){
   const ship=selectedShippingRate?.amount_cents||0;const tax=selectedShippingRate?.tax_cents??pickupTaxPreview?.tax_cents??0;const ready=document.getElementById('fulfillment')?.value==='pickup'?!!pickupTaxPreview:!!selectedShippingRate;
-  document.getElementById('checkoutSummary').innerHTML=cart.map(i=>`<div style="display:flex;justify-content:space-between;gap:12px"><span>${esc(i.title)} × ${i.qty}</span><b>${money(i.price_cents*i.qty)}</b></div>`).join('')+`<hr style="border:0;border-top:1px solid #333"><div style="display:flex;justify-content:space-between"><b>Subtotal</b><b>${money(subtotal())}</b></div>${selectedShippingRate?`<div style="display:flex;justify-content:space-between"><span>${esc(selectedShippingRate.provider)} ${esc(selectedShippingRate.service)}</span><b>${money(ship)}</b></div>`:''}${ready?`<div style="display:flex;justify-content:space-between"><span>Sales tax</span><b>${money(tax)}</b></div><div style="display:flex;justify-content:space-between;font-size:20px;margin-top:7px"><b>Order total*</b><b>${money(subtotal()+ship+tax)}</b></div>`:`<div class="smallNote">Enter your address and click GET SHIPPING RATES.</div>`}<div class="smallNote">*Card payment is not connected yet.</div>`;
+  document.getElementById('checkoutSummary').innerHTML=cart.map(i=>`<div style="display:flex;justify-content:space-between;gap:12px"><span>${esc(i.title)} × ${i.qty}</span><b>${money(i.price_cents*i.qty)}</b></div>`).join('')+`<hr style="border:0;border-top:1px solid #333"><div style="display:flex;justify-content:space-between"><b>Subtotal</b><b>${money(subtotal())}</b></div>${selectedShippingRate?`<div style="display:flex;justify-content:space-between"><span>${esc(selectedShippingRate.provider)} ${esc(selectedShippingRate.service)}</span><b>${money(ship)}</b></div>`:''}${ready?`<div style="display:flex;justify-content:space-between"><span>Sales tax</span><b>${money(tax)}</b></div><div style="display:flex;justify-content:space-between;font-size:20px;margin-top:7px"><b>Order total*</b><b>${money(subtotal()+ship+tax)}</b></div>`:`<div class="smallNote">Enter your address and click GET SHIPPING RATES.</div>`}<div class="smallNote" id="checkoutPaymentModeNote">*Payment is completed securely through PayPal for eligible merchandise.</div>`;
 }
 async function loadPickupTax(){try{pickupTaxPreview=null;renderCheckoutSummary();const r=await fetch(API+'/api/public/tax-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fulfillment:'pickup',shipping:null,shipping_cents:0,items:cart.map(i=>({inventory_id:i.id,quantity:i.qty}))})});const j=await r.json().catch(()=>({}));if(r.ok){pickupTaxPreview=j;renderCheckoutSummary()}}catch(e){console.warn(e)}}
 async function loadShippingRates(){
@@ -183,18 +183,12 @@ function openCheckout(){
   document.getElementById('checkoutMsg').className='full checkoutMsg';
   document.getElementById('checkoutModal').classList.add('open');
   document.body.style.overflow='hidden';
-  toggleShipping()
+  toggleShipping();loadPayPalCheckout()
 }
 function closeCheckout(){document.getElementById('checkoutModal').classList.remove('open');document.body.style.overflow=''}
-document.getElementById('checkoutForm').addEventListener('submit',async e=>{
-  e.preventDefault();
-  if(!cart.length)return;
-  const form=e.currentTarget;
-  const f=new FormData(form);
-  const msg=document.getElementById('checkoutMsg'),btn=document.getElementById('placeOrderBtn');
-  if(f.get('fulfillment')==='shipping'&&!selectedShippingRate){msg.className='full checkoutMsg show bad';msg.textContent='Click GET SHIPPING RATES and choose a shipping option first.';return}
-  btn.disabled=true;btn.textContent='PLACING ORDER...';
-  const payload={
+function checkoutPayload(){
+  const form=document.getElementById('checkoutForm'),f=new FormData(form);
+  return {
     customer:{name:f.get('name'),email:f.get('email'),phone:f.get('phone')},
     fulfillment:f.get('fulfillment'),
     shipping:f.get('fulfillment')==='shipping'?{address1:f.get('address1'),city:f.get('city'),state:f.get('state'),postal:f.get('postal')}:null,
@@ -203,18 +197,52 @@ document.getElementById('checkoutForm').addEventListener('submit',async e=>{
     notes:f.get('notes')||'',
     items:cart.map(i=>({inventory_id:i.id,quantity:i.qty}))
   };
-  try{
-    const r=await fetch(API+'/api/public/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok)throw new Error(j.error||'Could not place order');
-    msg.className='full checkoutMsg show good';
-    msg.innerHTML=`<b>Order received!</b><br>Order #${esc(j.order_number)}.${payload.fulfillment==='shipping'?` Shipping: ${money(j.shipping_cents||0)}. `:' '}We’ll contact you to confirm payment${payload.fulfillment==='shipping'?' and shipment':' and pickup'}.`;
-    cart=[];saveCart();form.reset();toggleShipping();
-    btn.style.display='none';
-  }catch(err){
-    msg.className='full checkoutMsg show bad';msg.textContent=err.message||'Could not place order';
-  }finally{btn.disabled=false;if(btn.style.display!=='none')btn.textContent='PLACE ORDER'}
-});
+}
+function validatePayPalCheckout(){
+  const form=document.getElementById('checkoutForm'),msg=document.getElementById('checkoutMsg');
+  if(!cart.length){msg.className='full checkoutMsg show bad';msg.textContent='Your cart is empty.';return false}
+  if(!form.reportValidity())return false;
+  const f=new FormData(form);
+  if(f.get('fulfillment')==='shipping'&&!selectedShippingRate){msg.className='full checkoutMsg show bad';msg.textContent='Click GET SHIPPING RATES and choose a shipping option first.';return false}
+  msg.className='full checkoutMsg';msg.textContent='';return true;
+}
+let paypalLoading=null,paypalButtonsRendered=false,paypalConfig=null;
+async function loadPayPalCheckout(){
+  if(paypalButtonsRendered)return;
+  if(paypalLoading)return paypalLoading;
+  paypalLoading=(async()=>{
+    const box=document.getElementById('paypal-button-container'),note=document.getElementById('paypalCheckoutNote');
+    try{
+      const r=await fetch(API+'/api/public/paypal/config'),cfg=await r.json().catch(()=>({}));if(!r.ok||!cfg.enabled)throw Error(cfg.error||'PayPal is not available yet.');
+      paypalConfig=cfg;
+      note.textContent=cfg.mode==='sandbox'?'PayPal SANDBOX TEST MODE — no real money will move. Firearms and ammunition are not eligible for PayPal checkout.':'Pay securely with PayPal. Firearms and ammunition are not eligible for PayPal checkout.';
+      if(!window.paypal){await new Promise((resolve,reject)=>{const sc=document.createElement('script');sc.src='https://www.paypal.com/sdk/js?client-id='+encodeURIComponent(cfg.client_id)+'&currency=USD&components=buttons&intent=capture';sc.onload=resolve;sc.onerror=()=>reject(Error('Could not load PayPal checkout.'));document.head.appendChild(sc)})}
+      if(paypalButtonsRendered)return;
+      await window.paypal.Buttons({
+        fundingSource:window.paypal.FUNDING.PAYPAL,
+        style:{layout:'vertical',shape:'rect',label:'paypal'},
+        createOrder:async()=>{
+          if(!validatePayPalCheckout())throw Error('Checkout information is incomplete.');
+          const payload=checkoutPayload();
+          const r=await fetch(API+'/api/public/paypal/create-order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Could not start PayPal checkout.');return j.id;
+        },
+        onApprove:async data=>{
+          const msg=document.getElementById('checkoutMsg');msg.className='full checkoutMsg show';msg.textContent='Completing PayPal payment...';
+          try{
+            const payload={...checkoutPayload(),paypal_order_id:data.orderID};const token=localStorage.getItem('pe_customer_token');
+            const r=await fetch(API+'/api/public/paypal/capture-order',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(payload)}),j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Could not complete PayPal payment.');
+            msg.className='full checkoutMsg show good';msg.innerHTML=`<b>Payment complete!</b><br>Order #${esc(j.order_number)} has been paid through PayPal. We’ll contact you with the next ${payload.fulfillment==='shipping'?'shipping':'pickup'} update.`;
+            cart=[];saveCart();document.getElementById('checkoutForm').reset();selectedShippingRate=null;pickupTaxPreview=null;toggleShipping();box.style.display='none';
+          }catch(err){msg.className='full checkoutMsg show bad';msg.textContent=err.message||'Could not complete PayPal payment.'}
+        },
+        onCancel:()=>{const msg=document.getElementById('checkoutMsg');msg.className='full checkoutMsg show bad';msg.textContent='PayPal checkout was cancelled. Your order was not completed.'},
+        onError:err=>{console.error(err);const msg=document.getElementById('checkoutMsg');msg.className='full checkoutMsg show bad';msg.textContent=err?.message||'PayPal checkout could not be completed.'}
+      }).render('#paypal-button-container');
+      paypalButtonsRendered=true;
+    }catch(err){box.innerHTML='';note.textContent=err.message||'PayPal checkout is temporarily unavailable.';note.style.color='#ff9b9b'}
+  })().finally(()=>{paypalLoading=null});return paypalLoading;
+}
+document.getElementById('checkoutForm').addEventListener('submit',e=>{e.preventDefault();validatePayPalCheckout()});
 
 document.getElementById('searchBox')?.addEventListener('input',()=>render());
 document.getElementById('sortBox')?.addEventListener('change',()=>render());
