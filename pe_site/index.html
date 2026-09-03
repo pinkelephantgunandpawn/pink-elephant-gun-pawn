@@ -103,6 +103,23 @@ document.addEventListener("DOMContentLoaded",()=>{
 });
 </script>
 
+
+<style id="peCategoryPhotoFix2026">
+.peCatPhoto{
+  background-size:cover!important;
+  background-position:center!important;
+  background-repeat:no-repeat!important;
+  position:relative;
+}
+.peCatPhoto:after{
+  content:"";
+  position:absolute;
+  inset:0;
+  background:linear-gradient(180deg,rgba(0,0,0,.02),rgba(0,0,0,.28));
+  pointer-events:none;
+}
+</style>
+
 </head><body>
 
 <div class="peTopBar">
@@ -166,12 +183,12 @@ document.addEventListener("DOMContentLoaded",()=>{
   <div class="peCategoryWrap">
     <h2>SHOP BY CATEGORY</h2>
     <div class="peCategoryGrid">
-      <button type="button" class="peCatCard" data-cat="Handguns"><div class="peCatArt peCatHandgun">▰</div><b>HANDGUNS</b></button>
-      <button type="button" class="peCatCard" data-cat="Rifles"><div class="peCatArt peCatRifle">╾━</div><b>RIFLES</b></button>
-      <button type="button" class="peCatCard" data-cat="Ammunition"><div class="peCatArt peCatAmmo">◉ ◉</div><b>AMMO</b></button>
-      <button type="button" class="peCatCard" data-cat="Optics"><div class="peCatArt peCatOptic">◎</div><b>OPTICS</b></button>
-      <button type="button" class="peCatCard" data-cat="Knives"><div class="peCatArt peCatKnife">➤</div><b>KNIVES</b></button>
-      <button type="button" class="peCatCard" data-cat="Accessories"><div class="peCatArt peCatGear">▦</div><b>ACCESSORIES</b></button>
+      <button type="button" class="peCatCard" data-cat="Handguns"><div class="peCatArt peCatPhoto" style="background-image:url('/assets/categories/handguns.jpg')"></div><b>HANDGUNS</b></button>
+      <button type="button" class="peCatCard" data-cat="Rifles"><div class="peCatArt peCatPhoto" style="background-image:url('/assets/categories/rifles.jpg')"></div><b>RIFLES</b></button>
+      <button type="button" class="peCatCard" data-cat="Ammunition"><div class="peCatArt peCatPhoto" style="background-image:url('/assets/categories/ammo.jpg')"></div><b>AMMO</b></button>
+      <button type="button" class="peCatCard" data-cat="Optics"><div class="peCatArt peCatPhoto" style="background-image:url('/assets/categories/optics.jpg')"></div><b>OPTICS</b></button>
+      <button type="button" class="peCatCard" data-cat="Knives"><div class="peCatArt peCatPhoto" style="background-image:url('/assets/categories/knives.jpg')"></div><b>KNIVES</b></button>
+      <button type="button" class="peCatCard" data-cat="Accessories"><div class="peCatArt peCatPhoto" style="background-image:url('/assets/categories/accessories.jpg')"></div><b>ACCESSORIES</b></button>
     </div>
   </div>
 </section>
