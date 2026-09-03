@@ -92,8 +92,8 @@ async function sendOrderEmail(orderId,type='confirmation'){
   const lines=(o.items||[]).map(i=>`${i.title} x ${i.quantity} — ${moneyText(i.line_total_cents)}`).join('\n');
   const itemHtml=(o.items||[]).map(i=>`<tr><td style="padding:7px 0">${String(i.title).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]))} × ${i.quantity}</td><td style="padding:7px 0;text-align:right">${moneyText(i.line_total_cents)}</td></tr>`).join('');
   const tracking=o.tracking_number?(o.tracking_url?`<p><a href="${o.tracking_url}" style="display:inline-block;background:#e86aa7;color:#16070f;text-decoration:none;font-weight:900;padding:11px 16px;border-radius:8px">TRACK PACKAGE</a><br><span style="font-size:12px;color:#666">${o.tracking_number}</span></p>`:`<p><b>Tracking:</b> ${o.tracking_number}</p>`):'';
-  const subjects={confirmation:`Order received — ${o.order_number}`,confirmed:`Order confirmed — ${o.order_number}`,ready:`Your order is ready — ${o.order_number}`,shipped:`Your order shipped — ${o.order_number}`,completed:`Order complete — ${o.order_number}`,cancelled:`Order cancelled — ${o.order_number}`};
-  const intros={confirmation:'Thanks for your order. We received it and will keep you updated as it moves through the shop.',confirmed:'Your order has been confirmed and is being prepared.',ready:o.fulfillment==='pickup'?'Your order is ready for pickup at Pink Elephant Gun & Pawn.':'Your order is packed and ready for the next shipping step.',shipped:'Your order has shipped. Tracking information is below.',completed:'Your order is complete. Thanks for shopping with Pink Elephant Gun & Pawn.',cancelled:'This order has been cancelled. If you have questions, call the shop at (606) 506-5030.'};
+  const subjects={confirmation:`Order received — ${o.order_number}`,confirmed:`Order confirmed — ${o.order_number}`,ready:`Your order is ready — ${o.order_number}`,shipped:`Your order shipped — ${o.order_number}`,completed:`Order complete — ${o.order_number}`,cancelled:`Order cancelled — ${o.order_number}`,refund:`Refund completed — ${o.order_number}`};
+  const intros={confirmation:'Thanks for your order. We received it and will keep you updated as it moves through the shop.',confirmed:'Your order has been confirmed and is being prepared.',ready:o.fulfillment==='pickup'?'Your order is ready for pickup at Pink Elephant Gun & Pawn.':'Your order is packed and ready for the next shipping step.',shipped:'Your order has shipped. Tracking information is below.',completed:'Your order is complete. Thanks for shopping with Pink Elephant Gun & Pawn.',cancelled:'This order has been cancelled. If you have questions, call the shop at (606) 506-5030.',refund:`Your PayPal refund for ${moneyText(o.refunded_cents||o.total_cents)} has been completed. Your order has been updated accordingly.`};
   const intro=intros[type]||intros.confirmation;
   const summary=`<p>${intro}</p><p><b>Order:</b> ${o.order_number}</p><table style="width:100%;border-collapse:collapse">${itemHtml}<tr><td style="padding-top:12px;border-top:1px solid #eee">Subtotal</td><td style="padding-top:12px;border-top:1px solid #eee;text-align:right">${moneyText(o.subtotal_cents)}</td></tr><tr><td>Tax</td><td style="text-align:right">${moneyText(o.tax_cents)}</td></tr><tr><td>Shipping</td><td style="text-align:right">${moneyText(o.shipping_cents)}</td></tr><tr><td style="font-weight:900;padding-top:7px">Total</td><td style="font-weight:900;text-align:right;padding-top:7px">${moneyText(o.total_cents)}</td></tr></table>${type==='shipped'?tracking:''}`;
   const text=`${intro}\n\nOrder ${o.order_number}\n${lines}\n\nSubtotal: ${moneyText(o.subtotal_cents)}\nTax: ${moneyText(o.tax_cents)}\nShipping: ${moneyText(o.shipping_cents)}\nTotal: ${moneyText(o.total_cents)}${o.tracking_number?`\nTracking: ${o.tracking_number}${o.tracking_url?' '+o.tracking_url:''}`:''}`;
@@ -243,6 +243,61 @@ async function paypalRequest(pathname,{method='GET',body=null,requestId=null}={}
   const r=await fetch(paypalApiBase()+pathname,{method,headers,body:body?JSON.stringify(body):undefined});
   const j=await r.json().catch(()=>({}));if(!r.ok){const detail=j?.details?.[0]?.description||j?.message||j?.name||'PayPal request failed.';const e=new Error(detail);e.status=502;e.paypal=j;throw e}return j;
 }
+function paypalCaptureIdFromOrder(ppOrder){
+  const units=Array.isArray(ppOrder?.purchase_units)?ppOrder.purchase_units:[];
+  for(const u of units){
+    const caps=Array.isArray(u?.payments?.captures)?u.payments.captures:[];
+    if(caps[0]?.id)return caps[0].id;
+  }
+  return null;
+}
+async function paypalResolveCapture(order){
+  let captureId=order.paypal_capture_id||null;
+  let ppOrder=null;
+  if(!captureId){
+    ppOrder=await paypalRequest('/v2/checkout/orders/'+encodeURIComponent(order.payment_reference));
+    captureId=paypalCaptureIdFromOrder(ppOrder);
+    if(captureId)await pool.query('UPDATE orders SET paypal_capture_id=$1,updated_at=now() WHERE id=$2',[captureId,order.id]);
+  }
+  if(!captureId){const e=new Error('No PayPal capture was found for this order.');e.status=409;throw e}
+  const capture=await paypalRequest('/v2/payments/captures/'+encodeURIComponent(captureId));
+  return {captureId,capture,ppOrder};
+}
+async function finalizePaypalRefund(orderId,{refundId=null,refundStatus='COMPLETED',amountCents=null}={}){
+  const c=await pool.connect();let updated=null,changed=false;
+  try{
+    await c.query('BEGIN');
+    const o=(await c.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE',[orderId])).rows[0];
+    if(!o){await c.query('ROLLBACK');return null}
+    const refundCents=amountCents==null?Number(o.total_cents||0):Math.max(0,Number(amountCents)||0);
+    const full=refundCents>=Number(o.total_cents||0);
+    if(full&&!o.inventory_restocked){
+      const its=(await c.query('SELECT inventory_id,quantity FROM order_items WHERE order_id=$1',[o.id])).rows;
+      for(const it of its)if(it.inventory_id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[it.quantity,it.inventory_id]);
+    }
+    const paymentStatus=full?'refunded':o.payment_status;
+    const orderStatus=full?'cancelled':o.order_status;
+    updated=(await c.query(`UPDATE orders SET payment_status=$1,order_status=$2,refunded_cents=$3,refunded_tax_cents=$4,refunded_at=COALESCE(refunded_at,now()),refund_status=$5,paypal_refund_id=COALESCE($6,paypal_refund_id),inventory_restocked=CASE WHEN $7 THEN true ELSE inventory_restocked END,cancelled_at=CASE WHEN $7 THEN COALESCE(cancelled_at,now()) ELSE cancelled_at END,updated_at=now() WHERE id=$8 RETURNING *`,[paymentStatus,orderStatus,refundCents,full?Number(o.tax_cents||0):0,refundStatus,refundId,full,o.id])).rows[0];
+    changed=o.payment_status!==updated.payment_status||o.refund_status!==updated.refund_status;
+    await c.query('COMMIT');
+  }catch(e){try{await c.query('ROLLBACK')}catch{};throw e}finally{c.release()}
+  if(changed&&updated?.payment_status==='refunded')sendOrderEmail(updated.id,'refund').catch(console.error);
+  return updated;
+}
+async function syncPaypalRefundState(order){
+  if(order.payment_provider!=='paypal'||!order.payment_reference){const e=new Error('This order is not a PayPal order.');e.status=400;throw e}
+  if(order.paypal_refund_id){
+    const refund=await paypalRequest('/v2/payments/refunds/'+encodeURIComponent(order.paypal_refund_id));
+    const amount=Math.round(Number(refund?.amount?.value||0)*100);
+    await pool.query('UPDATE orders SET refund_status=$1,refunded_cents=GREATEST(refunded_cents,$2),updated_at=now() WHERE id=$3',[refund.status||'UNKNOWN',amount,order.id]);
+    if(refund.status==='COMPLETED')return {order:await finalizePaypalRefund(order.id,{refundId:refund.id,refundStatus:refund.status,amountCents:amount}),paypal:{refund_status:refund.status,refund_id:refund.id}};
+    return {order:(await pool.query('SELECT * FROM orders WHERE id=$1',[order.id])).rows[0],paypal:{refund_status:refund.status,refund_id:refund.id}};
+  }
+  const {captureId,capture}=await paypalResolveCapture(order);
+  if(capture.status==='REFUNDED')return {order:await finalizePaypalRefund(order.id,{refundStatus:'COMPLETED',amountCents:Number(order.total_cents||0)}),paypal:{capture_status:capture.status,capture_id:captureId}};
+  return {order:(await pool.query('SELECT * FROM orders WHERE id=$1',[order.id])).rows[0],paypal:{capture_status:capture.status,capture_id:captureId,notice:'No completed refund is visible on the capture yet.'}};
+}
+
 function paypalBlockedItem(inv){
   if(inv.regulated)return true;
   const c=String(inv.category||'').toLowerCase();
@@ -416,7 +471,7 @@ app.post('/api/public/paypal/capture-order',checkoutLimit,async(req,res)=>{
       let done=pp;
       if(pp.status!=='COMPLETED')done=await paypalRequest('/v2/checkout/orders/'+encodeURIComponent(paypalOrderId)+'/capture',{method:'POST',requestId:'pe-capture-'+paypalOrderId});
       if(done?.status!=='COMPLETED')return res.status(409).json({error:'PayPal did not complete the payment.'});
-      const updated=(await pool.query("UPDATE orders SET payment_status='paid',paid_at=COALESCE(paid_at,now()),updated_at=now() WHERE id=$1 RETURNING *",[existing.id])).rows[0];
+      const capId=paypalCaptureIdFromOrder(done||pp);const updated=(await pool.query("UPDATE orders SET payment_status='paid',paid_at=COALESCE(paid_at,now()),paypal_capture_id=COALESCE($2,paypal_capture_id),updated_at=now() WHERE id=$1 RETURNING *",[existing.id,capId])).rows[0];
       sendOrderConfirmation(updated.id).catch(console.error);
       return res.json({order_number:updated.order_number,total_cents:updated.total_cents,payment_status:'paid',paypal_order_id:paypalOrderId});
     }
@@ -448,7 +503,7 @@ app.post('/api/public/paypal/capture-order',checkoutLimit,async(req,res)=>{
       }
     }
     const status=captured?.status||'';if(status!=='COMPLETED')throw Object.assign(new Error('PayPal did not complete the payment.'),{status:409});
-    const updated=(await pool.query("UPDATE orders SET payment_status='paid',paid_at=COALESCE(paid_at,now()),updated_at=now() WHERE id=$1 RETURNING *",[local.id])).rows[0];
+    const capId=paypalCaptureIdFromOrder(captured);const updated=(await pool.query("UPDATE orders SET payment_status='paid',paid_at=COALESCE(paid_at,now()),paypal_capture_id=COALESCE($2,paypal_capture_id),updated_at=now() WHERE id=$1 RETURNING *",[local.id,capId])).rows[0];
     sendOrderConfirmation(updated.id).catch(console.error);
     res.json({order_number:updated.order_number,total_cents:updated.total_cents,payment_status:'paid',paypal_order_id:paypalOrderId});
   }catch(e){console.error('PAYPAL CAPTURE',e);res.status(e.status||500).json({error:e.message||'Could not complete PayPal payment.'})}
@@ -585,6 +640,33 @@ app.patch('/api/orders/:id',auth,requireRole('manager'),async(req,res)=>{
 });
 
 
+
+app.post('/api/orders/:id/paypal-refund',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const order=(await pool.query('SELECT * FROM orders WHERE id=$1',[req.params.id])).rows[0];
+    if(!order)return res.status(404).json({error:'Order not found'});
+    if(order.payment_provider!=='paypal'||!order.payment_reference)return res.status(400).json({error:'This order was not paid through PayPal.'});
+    if(order.payment_status==='refunded')return res.json({ok:true,already_refunded:true,order});
+    if(order.paypal_refund_id){const synced=await syncPaypalRefundState(order);return res.json({ok:true,existing_refund:true,...synced})}
+    const {captureId}=await paypalResolveCapture(order);
+    const refund=await paypalRequest('/v2/payments/captures/'+encodeURIComponent(captureId)+'/refund',{method:'POST',requestId:'pe-refund-'+order.id,body:{amount:{currency_code:'USD',value:(Number(order.total_cents||0)/100).toFixed(2)},note_to_payer:'Pink Elephant Gun & Pawn order refund'}});
+    const amount=Math.round(Number(refund?.amount?.value||Number(order.total_cents||0)/100)*100);
+    await pool.query('UPDATE orders SET paypal_capture_id=$1,paypal_refund_id=$2,refund_status=$3,refunded_cents=$4,updated_at=now() WHERE id=$5',[captureId,refund.id||null,refund.status||'PENDING',amount,order.id]);
+    let updated=(await pool.query('SELECT * FROM orders WHERE id=$1',[order.id])).rows[0];
+    if(refund.status==='COMPLETED')updated=await finalizePaypalRefund(order.id,{refundId:refund.id,refundStatus:refund.status,amountCents:amount});
+    await audit(req,'PAYPAL_REFUND','order',order.id,{paypal_refund_id:refund.id,status:refund.status,amount_cents:amount});
+    res.json({ok:true,refund_status:refund.status,refund_id:refund.id,order:updated});
+  }catch(e){console.error('PAYPAL REFUND',e);res.status(e.status||500).json({error:e.message||'Could not refund PayPal order.'})}
+});
+app.post('/api/orders/:id/paypal-sync',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const order=(await pool.query('SELECT * FROM orders WHERE id=$1',[req.params.id])).rows[0];
+    if(!order)return res.status(404).json({error:'Order not found'});
+    const synced=await syncPaypalRefundState(order);
+    await audit(req,'PAYPAL_SYNC','order',order.id,synced.paypal||{});
+    res.json({ok:true,...synced});
+  }catch(e){console.error('PAYPAL SYNC',e);res.status(e.status||500).json({error:e.message||'Could not sync PayPal order.'})}
+});
 
 app.post('/api/orders/archive-test-labels',auth,requireRole('manager'),async(req,res)=>{
   try{
