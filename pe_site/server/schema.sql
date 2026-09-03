@@ -328,3 +328,8 @@ ALTER TABLE ffl_dealers ADD COLUMN IF NOT EXISTS source_updated_at timestamptz;
 CREATE UNIQUE INDEX IF NOT EXISTS ffl_dealers_source_identity_idx ON ffl_dealers(source,name,address1,city,state,postal);
 CREATE INDEX IF NOT EXISTS ffl_dealers_geo_idx ON ffl_dealers(active,latitude,longitude);
 CREATE INDEX IF NOT EXISTS ffl_dealers_postal_idx ON ffl_dealers(active,postal);
+
+-- PayPal checkout tracking
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_provider text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_reference text;
+CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_provider_reference_uq ON orders(payment_provider,payment_reference) WHERE payment_provider IS NOT NULL AND payment_reference IS NOT NULL;
