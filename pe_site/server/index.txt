@@ -7,9 +7,12 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
 import { z } from 'zod';
+import nodemailer from 'nodemailer';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const { Pool } = pg;
 const app = express();
@@ -26,6 +29,50 @@ if (!process.env.DATABASE_URL || !process.env.JWT_SECRET) throw new Error('DATAB
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function r2Config(){
+  const accountId=process.env.R2_ACCOUNT_ID?.trim();
+  const accessKeyId=process.env.R2_ACCESS_KEY_ID?.trim();
+  const secretAccessKey=process.env.R2_SECRET_ACCESS_KEY?.trim();
+  const bucket=process.env.R2_BUCKET_NAME?.trim();
+  const publicBase=process.env.R2_PUBLIC_BASE_URL?.trim()?.replace(/\/+$/,'');
+  if(!accountId||!accessKeyId||!secretAccessKey||!bucket||!publicBase)return null;
+  return {accountId,accessKeyId,secretAccessKey,bucket,publicBase};
+}
+let _r2Client=null;
+function r2Client(){
+  const cfg=r2Config();
+  if(!cfg)throw Object.assign(new Error('R2 image storage is not configured. Add R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME and R2_PUBLIC_BASE_URL on Render.'),{status:503});
+  if(!_r2Client)_r2Client=new S3Client({region:'auto',endpoint:`https://${cfg.accountId}.r2.cloudflarestorage.com`,credentials:{accessKeyId:cfg.accessKeyId,secretAccessKey:cfg.secretAccessKey}});
+  return {client:_r2Client,cfg};
+}
+function decodeImageDataUri(v){
+  const m=String(v||'').match(/^data:image\/(jpeg|jpg|png|webp);base64,(.+)$/is);
+  if(!m)return null;
+  const type=m[1].toLowerCase()==='jpg'?'jpeg':m[1].toLowerCase();
+  return {body:Buffer.from(m[2],'base64'),contentType:`image/${type}`,ext:type==='jpeg'?'jpg':type};
+}
+async function storeImageRef(v,prefix='inventory'){
+  if(v==null||v==='')return v||null;
+  if(/^https?:\/\//i.test(v))return v;
+  const decoded=decodeImageDataUri(v);
+  if(!decoded)throw Object.assign(new Error('Invalid image data'),{status:400});
+  const {client,cfg}=r2Client();
+  const key=`${prefix}/${new Date().toISOString().slice(0,10)}/${randomUUID()}.${decoded.ext}`;
+  await client.send(new PutObjectCommand({Bucket:cfg.bucket,Key:key,Body:decoded.body,ContentType:decoded.contentType,CacheControl:'public, max-age=31536000, immutable'}));
+  return `${cfg.publicBase}/${key}`;
+}
+async function normalizeInventoryImages(x){
+  const out={...x};
+  if(out.image_url)out.image_url=await storeImageRef(out.image_url,'inventory');
+  if(Array.isArray(out.image_urls)){
+    const urls=[];
+    for(const v of out.image_urls)urls.push(await storeImageRef(v,'inventory'));
+    out.image_urls=urls;
+    if(!out.image_url&&urls[0])out.image_url=urls[0];
+  }
+  return out;
+}
 async function ensureSchema(){ const schema=await fs.readFile(path.join(__dirname,'schema.sql'),'utf8'); await pool.query(schema); }
 
 app.set('trust proxy', 1);
@@ -45,6 +92,45 @@ app.use(express.json({ limit: '6mb' }));
 app.use(rateLimit({ windowMs: 15*60*1000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false }));
 const loginLimit = rateLimit({ windowMs: 15*60*1000, limit: 10, message: { error:'Too many login attempts. Try again later.' } });
 const checkoutLimit = rateLimit({ windowMs: 15*60*1000, limit: 12, message: { error:'Too many checkout attempts. Try again shortly.' } });
+
+function taxConfig(){
+  const taxableStates=String(process.env.TAXABLE_STATES||'KY').split(',').map(x=>x.trim().toUpperCase()).filter(Boolean);
+  const storeState=String(process.env.STORE_STATE||'KY').trim().toUpperCase();
+  return {taxableStates,storeState};
+}
+function taxRateBps(state){
+  const st=String(state||'').toUpperCase();
+  const specific=Number(process.env['TAX_RATE_BPS_'+st]);
+  if(Number.isFinite(specific)&&specific>=0)return specific;
+  const generic=Number(process.env.SALES_TAX_RATE_BPS||600);
+  return Number.isFinite(generic)&&generic>=0?generic:0;
+}
+function calculateSalesTax({subtotalCents,shippingCents=0,state,fulfillment}){
+  const cfg=taxConfig();
+  const st=(fulfillment==='pickup'?cfg.storeState:String(state||'').toUpperCase());
+  if(!cfg.taxableStates.includes(st))return {tax_cents:0,state:st,rate_bps:0,taxable:false};
+  const rate=taxRateBps(st);
+  // Kentucky includes seller-responsible delivery charges in taxable sales price. Other states can be configured separately later.
+  const taxableBase=Math.max(0,Number(subtotalCents)||0)+Math.max(0,Number(shippingCents)||0);
+  return {tax_cents:Math.round(taxableBase*rate/10000),state:st,rate_bps:rate,taxable:true};
+}
+
+function smtpTransport(){
+  if(!process.env.SMTP_HOST||!process.env.SMTP_USER||!process.env.SMTP_PASS)return null;
+  return nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),secure:String(process.env.SMTP_SECURE||'false').toLowerCase()==='true',auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}});
+}
+async function sendOrderConfirmation(orderId){
+  const tx=smtpTransport();if(!tx)return {sent:false,reason:'SMTP not configured'};
+  const {rows}=await pool.query(`SELECT o.*,COALESCE(json_agg(json_build_object('title',oi.item_title,'quantity',oi.quantity,'line_total_cents',oi.line_total_cents)) FILTER (WHERE oi.id IS NOT NULL),'[]') AS items FROM orders o LEFT JOIN order_items oi ON oi.order_id=o.id WHERE o.id=$1 GROUP BY o.id`,[orderId]);
+  const o=rows[0];if(!o)return {sent:false,reason:'Order not found'};
+  const money=c=>'$'+(Number(c||0)/100).toFixed(2);
+  const lines=(o.items||[]).map(i=>`${i.title} x ${i.quantity} — ${money(i.line_total_cents)}`).join('\n');
+  const from=process.env.ORDER_FROM_EMAIL||process.env.SMTP_USER;
+  const text=`Thanks for your order with Pink Elephant Gun & Pawn.\n\nOrder ${o.order_number}\n${lines}\n\nSubtotal: ${money(o.subtotal_cents)}\nTax: ${money(o.tax_cents)}\nShipping: ${money(o.shipping_cents)}\nTotal: ${money(o.total_cents)}\n\nPayment status: ${o.payment_status}.`;
+  try{await tx.sendMail({from,to:o.customer_email,subject:`Pink Elephant order ${o.order_number}`,text});await pool.query('UPDATE orders SET customer_email_sent_at=now(),customer_email_error=NULL WHERE id=$1',[o.id]);return {sent:true}}
+  catch(e){await pool.query('UPDATE orders SET customer_email_error=$1 WHERE id=$2',[String(e.message||e).slice(0,1000),o.id]);return {sent:false,reason:e.message||'Email failed'}}
+}
+
 
 const roles = { viewer: 1, manager: 2, admin: 3 };
 const sign = u => jwt.sign({ sub:u.id, email:u.email, role:u.role }, process.env.JWT_SECRET, { expiresIn:'8h', issuer:'pink-elephant-api' });
@@ -72,21 +158,231 @@ app.post('/api/auth/login', loginLimit, async (req,res)=>{
 app.get('/api/me',auth,(req,res)=>res.json({user:req.user}));
 
 app.get('/api/public/inventory',async (_req,res)=>{
-  const {rows}=await pool.query(`SELECT id,title,category,quantity,price_cents,price_label,sale_price_cents,sku,item_type,condition,description,image_url,image_urls,regulated,featured FROM inventory WHERE public_visible=true AND quantity>0 ORDER BY updated_at DESC`);
+  const {rows}=await pool.query(`SELECT id,title,category,quantity,price_cents,price_label,sale_price_cents,sku,item_type,condition,description,image_url,image_urls,regulated,featured,created_at,updated_at,low_stock FROM inventory WHERE public_visible=true AND quantity>0 ORDER BY updated_at DESC`);
   res.json(rows);
 });
+
+// ---------- SHIPPO TEST SHIPPING RATES ----------
+const SHIPPO_API='https://api.goshippo.com';
+function shippoHeaders(){
+  const token=process.env.SHIPPO_API_TOKEN?.trim();
+  if(!token){const e=new Error('SHIPPO_API_TOKEN is not configured');e.status=503;throw e}
+  return {'Authorization':'ShippoToken '+token,'Content-Type':'application/json'};
+}
+function shipFromAddress(){return {
+  name:process.env.SHIP_FROM_NAME||'Pink Elephant Gun & Pawn',
+  company:process.env.SHIP_FROM_COMPANY||'Pink Elephant Gun & Pawn',
+  street1:process.env.SHIP_FROM_STREET1||'30 Colonels Ct',
+  city:process.env.SHIP_FROM_CITY||'Prestonsburg',
+  state:process.env.SHIP_FROM_STATE||'KY',
+  zip:process.env.SHIP_FROM_ZIP||'41653',
+  country:'US',
+  phone:process.env.SHIP_FROM_PHONE||'6065065030',
+  email:process.env.SHIP_FROM_EMAIL||''
+}}
+const SHIPPING_ESTIMATE_BUFFER_CENTS=Math.max(0,Number.parseInt(process.env.SHIPPING_ESTIMATE_BUFFER_CENTS||'400',10)||0);
+const SHIPPING_DEFAULTS={
+  small:{weight:1,length:10,width:8,height:4},
+  medium:{weight:4,length:16,width:12,height:8},
+  large:{weight:10,length:22,width:18,height:14},
+  guitar:{weight:18,length:48,width:20,height:8},
+  console:{weight:12,length:18,width:14,height:8}
+};
+function estimatedParcelForInventory(inv){
+  const saved=[inv.shipping_weight_lb,inv.shipping_length_in,inv.shipping_width_in,inv.shipping_height_in].map(Number);
+  if(saved.every(v=>Number.isFinite(v)&&v>0))return {weight:saved[0],length:saved[1],width:saved[2],height:saved[3],estimated:false,profile:'saved'};
+  const cat=String(inv.category||'').toLowerCase();
+  let key='medium';
+  if(/jewel|collect|accessor|coin|card/.test(cat))key='small';
+  else if(/gaming|console|electronic/.test(cat))key='console';
+  else if(/music|guitar|instrument/.test(cat))key='guitar';
+  else if(/tool|large|sport/.test(cat))key='large';
+  const p={...SHIPPING_DEFAULTS[key]};
+  if(Number.isFinite(saved[0])&&saved[0]>0)p.weight=saved[0];
+  return {...p,estimated:true,profile:key};
+}
+const shippingQuoteSchema=z.object({
+  customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40)}),
+  shipping:z.object({address1:z.string().trim().min(3).max(180),city:z.string().trim().min(2).max(100),state:z.string().trim().min(2).max(50),postal:z.string().trim().min(3).max(20)}),
+  items:z.array(z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive().max(99)})).min(1).max(25)
+});
+app.post('/api/public/shipping-rates',checkoutLimit,async(req,res)=>{
+  const p=shippingQuoteSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Enter your contact and shipping address first.'});
+  try{
+    // Confirm cart availability and build parcels from each inventory item's saved package data.
+    const parcels=[];
+    for(const requested of p.data.items){
+      const inv=(await pool.query('SELECT id,title,category,quantity,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];
+      if(!inv||!inv.public_visible||inv.quantity<requested.quantity)return res.status(409).json({error:'An item in your cart is no longer available.'});
+      if(inv.regulated)return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});
+      const parcel=estimatedParcelForInventory(inv);
+      for(let n=0;n<requested.quantity;n++)parcels.push({length:String(parcel.length),width:String(parcel.width),height:String(parcel.height),distance_unit:'in',weight:String(parcel.weight),mass_unit:'lb',_estimated:parcel.estimated,_profile:parcel.profile});
+    }
+    const shippoParcels=parcels.map(({_estimated,_profile,...p})=>p);
+    const body={address_from:shipFromAddress(),address_to:{name:p.data.customer.name,street1:p.data.shipping.address1,city:p.data.shipping.city,state:p.data.shipping.state.toUpperCase(),zip:p.data.shipping.postal,country:'US',phone:p.data.customer.phone,email:p.data.customer.email},parcels:shippoParcels,async:false};
+    const r=await fetch(SHIPPO_API+'/shipments/',{method:'POST',headers:shippoHeaders(),body:JSON.stringify(body)});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(j.detail||j.message||j.error||'Shippo could not create a rate quote.');
+    let subtotalCents=0;
+    for(const requested of p.data.items){const inv=(await pool.query('SELECT price_cents,sale_price_cents FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];const unit=inv?.sale_price_cents!=null?Number(inv.sale_price_cents):Number(inv?.price_cents||0);subtotalCents+=unit*requested.quantity}
+    const rates=(j.rates||[]).filter(x=>x.object_id&&Number.isFinite(Number(x.amount))).map(x=>{
+      const carrier_amount_cents=Math.round(Number(x.amount)*100);const amount_cents=carrier_amount_cents+SHIPPING_ESTIMATE_BUFFER_CENTS;const tax=calculateSalesTax({subtotalCents,shippingCents:amount_cents,state:p.data.shipping.state,fulfillment:'shipping'});
+      return {rate_id:x.object_id,shipment_id:j.object_id,provider:x.provider||'',service:x.servicelevel?.name||x.servicelevel?.token||'Shipping',amount_cents,carrier_amount_cents,estimate_buffer_cents:SHIPPING_ESTIMATE_BUFFER_CENTS,currency:x.currency||'USD',estimated_days:x.estimated_days??null,duration_terms:x.duration_terms||'',test:!!x.test,tax_cents:tax.tax_cents,tax_rate_bps:tax.rate_bps,total_cents:subtotalCents+amount_cents+tax.tax_cents,estimated_shipping:true};
+    }).sort((a,b)=>a.amount_cents-b.amount_cents).slice(0,12);
+    if(!rates.length)return res.status(502).json({error:'Shippo returned no shipping rates for this address.'});
+    res.json({rates,test_mode:rates.every(x=>x.test),subtotal_cents:subtotalCents,parcel_note:`Estimated shipping uses saved package data when available and safe category presets otherwise. A ${'$'}${(SHIPPING_ESTIMATE_BUFFER_CENTS/100).toFixed(2)} packing/estimate buffer is included.`});
+  }catch(e){console.error(e);res.status(e.status||502).json({error:e.message||'Could not load shipping rates.'})}
+});
+app.post('/api/public/tax-preview',checkoutLimit,async(req,res)=>{
+  const p=z.object({fulfillment:z.enum(['pickup','shipping']),shipping:z.object({state:z.string().trim().min(2).max(50)}).nullable().optional(),shipping_cents:z.number().int().min(0).default(0),items:z.array(z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive().max(99)})).min(1).max(25)}).safeParse(req.body);
+  if(!p.success)return res.status(400).json({error:'Invalid tax preview request.'});
+  try{let subtotal=0;for(const requested of p.data.items){const inv=(await pool.query('SELECT title,quantity,price_cents,sale_price_cents,regulated,public_visible FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];if(!inv||!inv.public_visible||inv.quantity<requested.quantity)return res.status(409).json({error:'An item in your cart is no longer available.'});if(inv.regulated)return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});const unit=inv.sale_price_cents!=null?Number(inv.sale_price_cents):Number(inv.price_cents);if(!Number.isFinite(unit))return res.status(400).json({error:`${inv.title} requires store pricing.`});subtotal+=unit*requested.quantity}
+    const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents:p.data.shipping_cents,state:p.data.shipping?.state,fulfillment:p.data.fulfillment});res.json({subtotal_cents:subtotal,shipping_cents:p.data.shipping_cents,tax_cents:tax.tax_cents,total_cents:subtotal+p.data.shipping_cents+tax.tax_cents,tax_state:tax.state,tax_rate_bps:tax.rate_bps,taxable:tax.taxable});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not calculate tax preview.'})}
+});
+
+async function verifyShippoRate(rateId,shipmentId){
+  const r=await fetch(SHIPPO_API+'/rates/'+encodeURIComponent(rateId),{headers:shippoHeaders()});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||j.message||'Could not verify the selected shipping rate.');
+  if(shipmentId&&j.shipment!==shipmentId)throw new Error('The selected shipping rate does not match this quote.');
+  const carrierCents=Math.round(Number(j.amount)*100);const cents=carrierCents+SHIPPING_ESTIMATE_BUFFER_CENTS;if(!Number.isFinite(cents)||cents<0)throw new Error('The selected shipping rate is invalid.');
+  return {cents,provider:j.provider||'',service:j.servicelevel?.name||j.servicelevel?.token||'Shipping',rate_id:j.object_id,shipment_id:j.shipment||shipmentId||null,test:!!j.test};
+}
 
 const publicOrderSchema=z.object({
   customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40)}),
   fulfillment:z.enum(['pickup','shipping']),
   shipping:z.object({address1:z.string().trim().min(3).max(180),city:z.string().trim().min(2).max(100),state:z.string().trim().min(2).max(50),postal:z.string().trim().min(3).max(20)}).nullable().optional(),
+  shippo_rate_id:z.string().trim().max(120).nullable().optional(),
+  shippo_shipment_id:z.string().trim().max(120).nullable().optional(),
   notes:z.string().trim().max(1000).default(''),
   items:z.array(z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive().max(99)})).min(1).max(25)
 });
+
+const customerAuth=(req,res,next)=>{
+  try{
+    const raw=req.headers.authorization||'';
+    const token=raw.startsWith('Bearer ')?raw.slice(7):'';
+    if(!token)return res.status(401).json({error:'Sign in required'});
+    const data=jwt.verify(token,process.env.JWT_SECRET);
+    if(data.type!=='customer'||!data.customer_id)return res.status(401).json({error:'Invalid customer session'});
+    req.customer={id:Number(data.customer_id),email:data.email};
+    next();
+  }catch(e){return res.status(401).json({error:'Invalid or expired customer session'})}
+};
+
+app.post('/api/public/customer/register',async(req,res)=>{
+  try{
+    const email=String(req.body?.email||'').trim().toLowerCase();
+    const password=String(req.body?.password||'');
+    const name=String(req.body?.name||'').trim();
+    const phone=String(req.body?.phone||'').trim();
+    if(!email||!email.includes('@'))return res.status(400).json({error:'Valid email required'});
+    if(password.length<8)return res.status(400).json({error:'Password must be at least 8 characters'});
+    const exists=await pool.query('select id from customers where email=$1',[email]);
+    if(exists.rowCount)return res.status(409).json({error:'An account already exists for that email'});
+    const hash=await bcrypt.hash(password,12);
+    const q=await pool.query(
+      `insert into customers(email,password_hash,name,phone) values($1,$2,$3,$4)
+       returning id,email,name,phone,created_at`,
+      [email,hash,name||null,phone||null]
+    );
+    const c=q.rows[0];
+    const token=jwt.sign({type:'customer',customer_id:c.id,email:c.email},process.env.JWT_SECRET,{expiresIn:'30d'});
+    res.status(201).json({token,customer:c});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not create account'})}
+});
+
+app.post('/api/public/customer/login',async(req,res)=>{
+  try{
+    const email=String(req.body?.email||'').trim().toLowerCase();
+    const password=String(req.body?.password||'');
+    const q=await pool.query('select * from customers where email=$1',[email]);
+    if(!q.rowCount)return res.status(401).json({error:'Invalid email or password'});
+    const c=q.rows[0];
+    if(!await bcrypt.compare(password,c.password_hash))return res.status(401).json({error:'Invalid email or password'});
+    const token=jwt.sign({type:'customer',customer_id:c.id,email:c.email},process.env.JWT_SECRET,{expiresIn:'30d'});
+    res.json({token,customer:{id:c.id,email:c.email,name:c.name,phone:c.phone,created_at:c.created_at}});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not sign in'})}
+});
+
+app.get('/api/customer/me',customerAuth,async(req,res)=>{
+  try{
+    const q=await pool.query('select id,email,name,phone,address1,address2,city,state,postal,bravo_customer_id,bravo_link_status,bravo_last_synced_at,created_at from customers where id=$1',[req.customer.id]);
+    if(!q.rowCount)return res.status(404).json({error:'Customer not found'});
+    res.json(q.rows[0]);
+  }catch(e){res.status(500).json({error:'Could not load account'})}
+});
+
+
+app.patch('/api/customer/me',customerAuth,async(req,res)=>{
+  try{
+    const p=z.object({
+      name:z.string().trim().min(1).max(180).optional(),
+      phone:z.string().trim().max(40).optional(),
+      address1:z.string().trim().max(180).nullable().optional(),
+      address2:z.string().trim().max(180).nullable().optional(),
+      city:z.string().trim().max(100).nullable().optional(),
+      state:z.string().trim().max(50).nullable().optional(),
+      postal:z.string().trim().max(20).nullable().optional()
+    }).safeParse(req.body);
+    if(!p.success)return res.status(400).json({error:'Please check your account information.'});
+    const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});
+    const vals=[],sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.customer.id);
+    const {rows}=await pool.query(`UPDATE customers SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING id,email,name,phone,address1,address2,city,state,postal,bravo_customer_id,bravo_link_status,bravo_last_synced_at,created_at`,vals);
+    res.json(rows[0]);
+  }catch(e){console.error(e);res.status(500).json({error:'Could not update account'})}
+});
+
+app.post('/api/public/order-lookup',async(req,res)=>{
+  try{
+    const p=z.object({order_number:z.string().trim().min(3).max(80),email:z.string().trim().email().max(180)}).safeParse(req.body);
+    if(!p.success)return res.status(400).json({error:'Enter the order number and email used at checkout.'});
+    const {rows}=await pool.query(
+      `SELECT o.id,o.order_number,o.created_at,o.order_status,o.payment_status,o.fulfillment,
+       o.subtotal_cents,o.tax_cents,o.shipping_cents,o.total_cents,o.shipping_provider,o.shipping_service,
+       o.tracking_number,o.tracking_url,
+       COALESCE(json_agg(json_build_object('title',oi.item_title,'quantity',oi.quantity,'unit_price_cents',oi.unit_price_cents,'line_total_cents',oi.line_total_cents))
+       FILTER (WHERE oi.id IS NOT NULL),'[]') items
+       FROM orders o LEFT JOIN order_items oi ON oi.order_id=o.id
+       WHERE upper(o.order_number)=upper($1) AND lower(o.customer_email)=lower($2)
+       GROUP BY o.id LIMIT 1`,
+      [p.data.order_number,p.data.email]
+    );
+    if(!rows[0])return res.status(404).json({error:'No order matched that order number and email.'});
+    res.json(rows[0]);
+  }catch(e){console.error(e);res.status(500).json({error:'Could not look up order'})}
+});
+
+app.get('/api/customer/orders',customerAuth,async(req,res)=>{
+  try{
+    const q=await pool.query(
+      `select o.*,coalesce(json_agg(json_build_object('title',oi.title,'quantity',oi.quantity,'unit_price_cents',oi.unit_price_cents)) filter (where oi.id is not null),'[]') items
+       from orders o left join order_items oi on oi.order_id=o.id
+       where o.customer_id=$1 or lower(o.customer_email)=lower($2)
+       group by o.id order by o.created_at desc`,
+      [req.customer.id,req.customer.email]
+    );
+    res.json(q.rows);
+  }catch(e){console.error(e);res.status(500).json({error:'Could not load orders'})}
+});
+
 app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
+  let checkoutCustomerId=null;
+  try{
+    const raw=req.headers.authorization||'';
+    if(raw.startsWith('Bearer ')){
+      const data=jwt.verify(raw.slice(7),process.env.JWT_SECRET);
+      if(data.type==='customer'&&data.customer_id)checkoutCustomerId=Number(data.customer_id);
+    }
+  }catch(_){}
+
   const p=publicOrderSchema.safeParse(req.body);
   if(!p.success)return res.status(400).json({error:'Please check the checkout information and try again.'});
   if(p.data.fulfillment==='shipping'&&!p.data.shipping)return res.status(400).json({error:'Shipping address is required.'});
+  if(p.data.fulfillment==='shipping'&&!p.data.shippo_rate_id)return res.status(400).json({error:'Choose a shipping rate before placing the order.'});
+  let verifiedShipping=null;
+  try{if(p.data.fulfillment==='shipping')verifiedShipping=await verifyShippoRate(p.data.shippo_rate_id,p.data.shippo_shipment_id)}catch(e){return res.status(400).json({error:e.message||'Could not verify shipping rate.'})}
   const c=await pool.connect();
   try{
     await c.query('BEGIN');
@@ -103,34 +399,72 @@ app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
     }
     const orderNumber='PE-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
     const shippingAddress=p.data.fulfillment==='shipping'?p.data.shipping:null;
-    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents) VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,0,$8) RETURNING id,order_number,subtotal_cents,total_cents,order_status,payment_status`,
-      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal])).rows[0];
+    const shippingCents=verifiedShipping?.cents||0;
+    const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents,state:p.data.shipping?.state,fulfillment:p.data.fulfillment});
+    const total=subtotal+shippingCents+tax.tax_cents;
+    const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service,customer_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id,order_number,subtotal_cents,tax_cents,shipping_cents,total_cents,order_status,payment_status`,
+      [orderNumber,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.fulfillment,shippingAddress,p.data.notes,subtotal,tax.tax_cents,shippingCents,total,verifiedShipping?.rate_id||null,verifiedShipping?.shipment_id||null,verifiedShipping?.provider||null,verifiedShipping?.service||null,checkoutCustomerId])).rows[0];
     for(const item of items){
       await c.query(`INSERT INTO order_items(order_id,inventory_id,item_title,quantity,unit_price_cents,line_total_cents) VALUES($1,$2,$3,$4,$5,$6)`,
         [order.id,item.inv.id,item.inv.title,item.quantity,item.unit,item.line]);
       await c.query('UPDATE inventory SET quantity=quantity-$1,updated_at=now() WHERE id=$2',[item.quantity,item.inv.id]);
     }
     await c.query('COMMIT');
-    res.status(201).json({order_number:order.order_number,subtotal_cents:order.subtotal_cents,total_cents:order.total_cents,status:order.order_status,payment_status:order.payment_status});
+    sendOrderConfirmation(order.id).catch(console.error);
+    res.status(201).json({order_number:order.order_number,subtotal_cents:order.subtotal_cents,tax_cents:order.tax_cents,shipping_cents:order.shipping_cents,total_cents:order.total_cents,status:order.order_status,payment_status:order.payment_status});
   }catch(e){
     try{await c.query('ROLLBACK')}catch{}
     console.error(e);res.status(e.status||500).json({error:e.status?e.message:'Could not place order. Please call the shop if the problem continues.'});
   }finally{c.release()}
 });
 
-const inventorySchema=z.object({title:z.string().min(1).max(180),category:z.string().min(1).max(80),quantity:z.number().int().min(0),cost_cents:z.number().int().min(0),price_cents:z.number().int().min(0).nullable().optional(),price_label:z.string().max(80).nullable().optional(),sku:z.string().max(80).nullable().optional(),item_type:z.enum(['quantity','individual']),low_stock:z.number().int().min(0),description:z.string().max(5000),image_url:z.string().max(5*1024*1024).refine(v=>/^https?:\/\//i.test(v)||/^data:image\/(jpeg|png|webp);base64,/i.test(v),'Image must be an http(s) URL or uploaded image').nullable().optional(),image_urls:z.array(z.string().max(5*1024*1024)).max(4).default([]),condition:z.string().min(1).max(80).default('Good'),sale_price_cents:z.number().int().min(0).nullable().optional(),featured:z.boolean().default(false),regulated:z.boolean().default(false),public_visible:z.boolean().default(true)});
+const inventorySchema=z.object({title:z.string().min(1).max(180),category:z.string().min(1).max(80),quantity:z.number().int().min(0),cost_cents:z.number().int().min(0),price_cents:z.number().int().min(0).nullable().optional(),price_label:z.string().max(80).nullable().optional(),sku:z.string().max(80).nullable().optional(),item_type:z.enum(['quantity','individual']),low_stock:z.number().int().min(0),description:z.string().max(5000),image_url:z.string().max(5*1024*1024).refine(v=>/^https?:\/\//i.test(v)||/^data:image\/(jpeg|png|webp);base64,/i.test(v),'Image must be an http(s) URL or uploaded image').nullable().optional(),image_urls:z.array(z.string().max(5*1024*1024)).max(4).default([]),condition:z.string().min(1).max(80).default('Good'),sale_price_cents:z.number().int().min(0).nullable().optional(),featured:z.boolean().default(false),regulated:z.boolean().default(false),public_visible:z.boolean().default(true),shipping_weight_lb:z.number().positive().nullable().optional(),shipping_length_in:z.number().positive().nullable().optional(),shipping_width_in:z.number().positive().nullable().optional(),shipping_height_in:z.number().positive().nullable().optional()});
 app.get('/api/inventory',auth,requireRole('viewer'),async (_req,res)=>{const {rows}=await pool.query('SELECT * FROM inventory ORDER BY updated_at DESC');res.json(rows);});
 app.post('/api/inventory',auth,requireRole('manager'),async (req,res)=>{
-  const p=inventorySchema.safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const x=p.data;
-  const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,[x.title,x.category,x.quantity,x.cost_cents,x.price_cents??null,x.price_label??null,x.sku||null,x.item_type,x.low_stock,x.description,x.image_url??(x.image_urls?.[0]||null),JSON.stringify(x.image_urls||[]),x.condition,x.sale_price_cents??null,x.featured,x.regulated,x.public_visible]);
+  const p=inventorySchema.safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const x=await normalizeInventoryImages(p.data);
+  const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,[x.title,x.category,x.quantity,x.cost_cents,x.price_cents??null,x.price_label??null,x.sku||null,x.item_type,x.low_stock,x.description,x.image_url??(x.image_urls?.[0]||null),JSON.stringify(x.image_urls||[]),x.condition,x.sale_price_cents??null,x.featured,x.regulated,x.public_visible,x.shipping_weight_lb??null,x.shipping_length_in??null,x.shipping_width_in??null,x.shipping_height_in??null]);
   await audit(req,'CREATE','inventory',rows[0].id,{title:x.title,regulated:x.regulated}); res.status(201).json(rows[0]);
 });
+app.post('/api/inventory/:id/duplicate',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in)
+      SELECT title || ' COPY',category,quantity,cost_cents,price_cents,price_label,NULL,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,false,regulated,false,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in
+      FROM inventory WHERE id=$1 RETURNING *`,[req.params.id]);
+    if(!rows[0])return res.status(404).json({error:'Inventory item not found'});
+    await audit(req,'DUPLICATE','inventory',rows[0].id,{source_id:req.params.id,title:rows[0].title});
+    res.status(201).json(rows[0]);
+  }catch(e){console.error(e);res.status(500).json({error:'Could not duplicate inventory item'})}
+});
 app.patch('/api/inventory/:id',auth,requireRole('manager'),async (req,res)=>{
-  const p=inventorySchema.partial().safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const keys=Object.keys(p.data); if(!keys.length)return res.status(400).json({error:'No changes'});
-  const map={price_cents:'price_cents',price_label:'price_label',title:'title',category:'category',quantity:'quantity',cost_cents:'cost_cents',sku:'sku',item_type:'item_type',low_stock:'low_stock',description:'description',image_url:'image_url',image_urls:'image_urls',condition:'condition',sale_price_cents:'sale_price_cents',featured:'featured',regulated:'regulated',public_visible:'public_visible'};
-  const vals=[]; const sets=[]; keys.forEach((k,i)=>{sets.push(`${map[k]}=$${i+1}`); vals.push(k==='image_urls'?JSON.stringify(p.data[k]||[]):(p.data[k]??null))}); vals.push(req.params.id);
+  const p=inventorySchema.partial().safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); let patch=p.data; const keys=Object.keys(patch); if(!keys.length)return res.status(400).json({error:'No changes'});
+  if('image_url' in patch || 'image_urls' in patch) patch=await normalizeInventoryImages(patch);
+  const map={price_cents:'price_cents',price_label:'price_label',title:'title',category:'category',quantity:'quantity',cost_cents:'cost_cents',sku:'sku',item_type:'item_type',low_stock:'low_stock',description:'description',image_url:'image_url',image_urls:'image_urls',condition:'condition',sale_price_cents:'sale_price_cents',featured:'featured',regulated:'regulated',public_visible:'public_visible',shipping_weight_lb:'shipping_weight_lb',shipping_length_in:'shipping_length_in',shipping_width_in:'shipping_width_in',shipping_height_in:'shipping_height_in'};
+  const vals=[]; const sets=[]; keys.forEach((k,i)=>{sets.push(`${map[k]}=$${i+1}`); vals.push(k==='image_urls'?JSON.stringify(patch[k]||[]):(patch[k]??null))}); vals.push(req.params.id);
   const {rows}=await pool.query(`UPDATE inventory SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals); if(!rows[0])return res.status(404).json({error:'Inventory item not found'});
   await audit(req,'UPDATE','inventory',rows[0].id,{fields:keys}); res.json(rows[0]);
+});
+const publicOfferSchema=z.object({
+  inventory_id:z.string().uuid(),
+  customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().max(40).optional().default('')}),
+  offer_cents:z.number().int().min(100),
+  message:z.string().trim().max(1000).optional().default('')
+});
+app.post('/api/public/offers',checkoutLimit,async(req,res)=>{
+  const p=publicOfferSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Enter your name, email and a valid offer.'});
+  try{
+    const inv=(await pool.query('SELECT id,title,quantity,price_cents,sale_price_cents,public_visible FROM inventory WHERE id=$1',[p.data.inventory_id])).rows[0];
+    if(!inv||!inv.public_visible||Number(inv.quantity)<=0)return res.status(409).json({error:'This item is no longer available.'});
+    const asking=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);
+    const {rows}=await pool.query(`INSERT INTO offers(inventory_id,item_title,asking_price_cents,offer_cents,customer_name,customer_email,customer_phone,customer_message) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,status,created_at`,[inv.id,inv.title,asking,p.data.offer_cents,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone||null,p.data.message||'']);
+    res.status(201).json({ok:true,offer_id:rows[0].id,status:rows[0].status});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not submit offer'})}
+});
+app.get('/api/offers',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query('SELECT * FROM offers ORDER BY created_at DESC LIMIT 1000');res.json(rows)});
+app.patch('/api/offers/:id',auth,requireRole('manager'),async(req,res)=>{
+  const p=z.object({status:z.enum(['new','contacted','accepted','countered','declined','expired']).optional(),counter_cents:z.number().int().min(0).nullable().optional(),admin_notes:z.string().max(3000).optional()}).safeParse(req.body);
+  if(!p.success)return res.status(400).json({error:'Invalid offer update'});const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});
+  const vals=[],sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.params.id);
+  const {rows}=await pool.query(`UPDATE offers SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:'Offer not found'});await audit(req,'UPDATE','offer',rows[0].id,{fields:keys});res.json(rows[0]);
 });
 app.post('/api/sales',auth,requireRole('manager'),async(req,res)=>{
   const p=z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive(),gross_cents:z.number().int().min(0),tax_cents:z.number().int().min(0),payment_method:z.string().min(1).max(80),order_ref:z.string().max(120).nullable().optional()}).safeParse(req.body);
@@ -145,17 +479,75 @@ app.delete('/api/inventory/:id',auth,requireRole('manager'),async(req,res)=>{con
 app.get('/api/traffic',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,traffic_date,visitors FROM foot_traffic ORDER BY traffic_date DESC LIMIT 1000');res.json(rows);});
 app.post('/api/traffic',auth,requireRole('manager'),async(req,res)=>{const p=z.object({traffic_date:z.string(),visitors:z.number().int().min(0)}).safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const {rows}=await pool.query(`INSERT INTO foot_traffic(traffic_date,visitors,created_by) VALUES($1,$2,$3) ON CONFLICT(traffic_date) DO UPDATE SET visitors=EXCLUDED.visitors,created_by=EXCLUDED.created_by RETURNING *`,[p.data.traffic_date,p.data.visitors,req.user.sub]); await audit(req,'UPSERT','foot_traffic',rows[0].id,{traffic_date:p.data.traffic_date,visitors:p.data.visitors}); res.status(201).json(rows[0]);});
 
-app.get('/api/orders',auth,requireRole('viewer'),async(_req,res)=>{
-  const {rows}=await pool.query(`SELECT o.*,COALESCE(json_agg(json_build_object('title',oi.item_title,'quantity',oi.quantity,'unit_price_cents',oi.unit_price_cents,'line_total_cents',oi.line_total_cents)) FILTER (WHERE oi.id IS NOT NULL),'[]') AS items FROM orders o LEFT JOIN order_items oi ON oi.order_id=o.id GROUP BY o.id ORDER BY o.created_at DESC LIMIT 1000`);
+app.get('/api/orders',auth,requireRole('viewer'),async(req,res)=>{
+  const includeHidden=String(req.query.include_hidden||'false')==='true';
+  const {rows}=await pool.query(`SELECT o.*,COALESCE(json_agg(json_build_object('title',oi.item_title,'quantity',oi.quantity,'unit_price_cents',oi.unit_price_cents,'line_total_cents',oi.line_total_cents)) FILTER (WHERE oi.id IS NOT NULL),'[]') AS items FROM orders o LEFT JOIN order_items oi ON oi.order_id=o.id WHERE ($1::boolean=true OR o.admin_hidden=false) GROUP BY o.id ORDER BY o.created_at DESC LIMIT 1000`,[includeHidden]);
   res.json(rows);
 });
 app.patch('/api/orders/:id',auth,requireRole('manager'),async(req,res)=>{
-  const p=z.object({order_status:z.enum(['new','confirmed','ready','shipped','completed','cancelled']).optional(),payment_status:z.enum(['pending','paid','refunded','cancelled']).optional(),tracking_number:z.string().max(180).nullable().optional(),admin_notes:z.string().max(3000).optional()}).safeParse(req.body);
+  const p=z.object({order_status:z.enum(['new','confirmed','ready','shipped','completed','cancelled']).optional(),payment_status:z.enum(['pending','paid','refunded','cancelled']).optional(),tracking_number:z.string().max(180).nullable().optional(),admin_notes:z.string().max(3000).optional(),paid_at:z.coerce.date().optional(),shipped_at:z.coerce.date().optional(),completed_at:z.coerce.date().optional(),cancelled_at:z.coerce.date().optional(),admin_hidden:z.boolean().optional()}).safeParse(req.body);
   if(!p.success)return res.status(400).json({error:p.error.issues});const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});
   const c=await pool.connect();try{await c.query('BEGIN');const current=(await c.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE',[req.params.id])).rows[0];if(!current){await c.query('ROLLBACK');return res.status(404).json({error:'Order not found'})}
     if(p.data.order_status==='cancelled'&&!current.inventory_restocked){const {rows:items}=await c.query('SELECT inventory_id,quantity FROM order_items WHERE order_id=$1',[current.id]);for(const i of items)if(i.inventory_id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[i.quantity,i.inventory_id]);p.data.inventory_restocked=true}
+    if(p.data.payment_status==='paid'&&!current.paid_at)p.data.paid_at=new Date();
+    if(p.data.order_status==='shipped'&&!current.shipped_at)p.data.shipped_at=new Date();
+    if(p.data.order_status==='completed'&&!current.completed_at)p.data.completed_at=new Date();
+    if(p.data.order_status==='cancelled'&&!current.cancelled_at)p.data.cancelled_at=new Date();
     const k2=Object.keys(p.data);const vals=[];const sets=[];k2.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.params.id);const {rows}=await c.query(`UPDATE orders SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals);await c.query('COMMIT');await audit(req,'UPDATE','order',rows[0].id,{fields:k2});res.json(rows[0]);
   }catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e);res.status(500).json({error:'Could not update order'})}finally{c.release()}
+});
+
+
+
+app.post('/api/orders/archive-test-labels',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const {rows}=await pool.query(`UPDATE orders SET admin_hidden=true,updated_at=now()
+      WHERE shipping_label_test=true AND admin_hidden=false RETURNING id,order_number`);
+    await audit(req,'ARCHIVE','orders',null,{reason:'test_labels',count:rows.length});
+    res.json({archived:rows.length,orders:rows});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not archive test orders'})}
+});
+app.post('/api/orders/:id/archive',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const {rows}=await pool.query('UPDATE orders SET admin_hidden=true,updated_at=now() WHERE id=$1 RETURNING id,order_number',[req.params.id]);
+    if(!rows[0])return res.status(404).json({error:'Order not found'});
+    await audit(req,'ARCHIVE','order',rows[0].id,{order_number:rows[0].order_number});
+    res.json(rows[0]);
+  }catch(e){console.error(e);res.status(500).json({error:'Could not archive order'})}
+});
+app.post('/api/orders/:id/unarchive',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const {rows}=await pool.query('UPDATE orders SET admin_hidden=false,updated_at=now() WHERE id=$1 RETURNING id,order_number',[req.params.id]);
+    if(!rows[0])return res.status(404).json({error:'Order not found'});
+    await audit(req,'UNARCHIVE','order',rows[0].id,{order_number:rows[0].order_number});
+    res.json(rows[0]);
+  }catch(e){console.error(e);res.status(500).json({error:'Could not restore order'})}
+});
+
+app.post('/api/orders/:id/send-confirmation',auth,requireRole('manager'),async(req,res)=>{
+  try{const result=await sendOrderConfirmation(req.params.id);if(!result.sent)return res.status(503).json({error:result.reason});res.json(result)}catch(e){console.error(e);res.status(500).json({error:'Could not send confirmation email'})}
+});
+
+app.post('/api/orders/:id/label',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const {rows}=await pool.query('SELECT * FROM orders WHERE id=$1',[req.params.id]);const o=rows[0];if(!o)return res.status(404).json({error:'Order not found'});
+    if(o.fulfillment!=='shipping')return res.status(400).json({error:'Pickup orders do not need a shipping label.'});
+    if(o.shipping_label_url)return res.json({label_url:o.shipping_label_url,tracking_number:o.tracking_number,tracking_url:o.tracking_url,test:o.shipping_label_test,existing:true});
+    if(!o.shippo_rate_id)return res.status(400).json({error:'This order does not have a Shippo rate. Recreate the order shipping quote first.'});
+    const token=process.env.SHIPPO_API_TOKEN||'';if(token.startsWith('shippo_live_')&&String(process.env.ALLOW_LIVE_LABEL_PURCHASE||'false').toLowerCase()!=='true')return res.status(403).json({error:'Live label purchase is locked. Set ALLOW_LIVE_LABEL_PURCHASE=true only when you are ready to buy real postage.'});
+    const r=await fetch(SHIPPO_API+'/transactions',{method:'POST',headers:shippoHeaders(),body:JSON.stringify({rate:o.shippo_rate_id,async:false,label_file_type:'PDF_4x6',metadata:o.order_number.slice(0,100)})});
+    const j=await r.json().catch(()=>({}));if(!r.ok||j.status==='ERROR')return res.status(502).json({error:j.messages?.map(x=>x.text).filter(Boolean).join('; ')||j.detail||j.message||'Shippo could not create the label.'});
+    const {rows:updated}=await pool.query(`UPDATE orders SET shippo_transaction_id=$1,shipping_label_url=$2,tracking_number=COALESCE($3,tracking_number),tracking_url=$4,shipping_label_test=$5,label_created_at=now(),updated_at=now() WHERE id=$6 RETURNING *`,[j.object_id||null,j.label_url||null,j.tracking_number||null,j.tracking_url_provider||null,!!j.test,o.id]);
+    await audit(req,'CREATE','shipping_label',o.id,{shippo_transaction_id:j.object_id,test:!!j.test});
+    res.status(201).json({label_url:j.label_url,tracking_number:j.tracking_number,tracking_url:j.tracking_url_provider,test:!!j.test,transaction_id:j.object_id,order:updated[0]});
+  }catch(e){console.error(e);res.status(500).json({error:e.message||'Could not create shipping label'})}
+});
+
+app.post('/api/orders/:id/refund-label',auth,requireRole('manager'),async(req,res)=>{
+  try{const o=(await pool.query('SELECT * FROM orders WHERE id=$1',[req.params.id])).rows[0];if(!o)return res.status(404).json({error:'Order not found'});if(!o.shippo_transaction_id)return res.status(400).json({error:'No Shippo label exists for this order.'});
+    const r=await fetch(SHIPPO_API+'/refunds',{method:'POST',headers:shippoHeaders(),body:JSON.stringify({transaction:o.shippo_transaction_id,async:false})});const j=await r.json().catch(()=>({}));if(!r.ok)return res.status(502).json({error:j.detail||j.message||'Shippo could not request the label refund.'});
+    await pool.query('UPDATE orders SET shippo_refund_id=$1,shippo_refund_status=$2,updated_at=now() WHERE id=$3',[j.object_id||null,j.status||'PENDING',o.id]);await audit(req,'REFUND','shipping_label',o.id,{refund_id:j.object_id,status:j.status});res.json(j);
+  }catch(e){console.error(e);res.status(500).json({error:e.message||'Could not refund shipping label'})}
 });
 
 
@@ -213,6 +605,53 @@ app.get('/api/ffl-requests',auth,requireRole('viewer'),async(_req,res)=>{const {
 app.patch('/api/ffl-requests/:id',auth,requireRole('manager'),async(req,res)=>{
   const p=z.object({status:z.enum(['new','contacted','awaiting_ffl','ready','completed','declined','cancelled'])}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid status'});
   const {rows}=await pool.query('UPDATE ffl_requests SET status=$1,updated_at=now() WHERE id=$2 RETURNING *',[p.data.status,req.params.id]);if(!rows[0])return res.status(404).json({error:'Request not found'});res.json(rows[0]);
+});
+
+
+
+// ---------- BATCH INVENTORY INTAKE ----------
+const batchCreateSchema=z.object({name:z.string().trim().min(1).max(120)});
+const batchItemSchema=z.object({filename:z.string().trim().max(255).default('photo.jpg'),image_data:z.string().max(2*1024*1024).refine(v=>/^data:image\/(jpeg|png|webp);base64,/i.test(v),'Invalid image')});
+app.get('/api/batches',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query(`SELECT b.*,COUNT(bi.id)::int AS item_count,COUNT(bi.id) FILTER (WHERE bi.status='published')::int AS published_count FROM batch_uploads b LEFT JOIN batch_items bi ON bi.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100`);res.json(rows)});
+app.post('/api/batches',auth,requireRole('manager'),async(req,res)=>{const p=batchCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Batch name is required'});const {rows}=await pool.query('INSERT INTO batch_uploads(name,created_by) VALUES($1,$2) RETURNING *',[p.data.name,req.user.sub]);res.status(201).json(rows[0])});
+app.get('/api/batches/:id/items',auth,requireRole('viewer'),async(req,res)=>{const {rows}=await pool.query('SELECT * FROM batch_items WHERE batch_id=$1 ORDER BY created_at,id',[req.params.id]);res.json(rows)});
+app.post('/api/batches/:id/items',auth,requireRole('manager'),async(req,res)=>{const p=z.object({items:z.array(batchItemSchema).min(1).max(25)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Upload up to 25 compressed JPG/PNG/WebP images at a time'});const batch=(await pool.query('SELECT id FROM batch_uploads WHERE id=$1',[req.params.id])).rows[0];if(!batch)return res.status(404).json({error:'Batch not found'});const c=await pool.connect();try{await c.query('BEGIN');const rows=[];for(const x of p.data.items){const imageUrl=await storeImageRef(x.image_data,`batches/${batch.id}`);rows.push((await c.query(`INSERT INTO batch_items(batch_id,filename,image_data) VALUES($1,$2,$3) RETURNING *`,[batch.id,x.filename,imageUrl])).rows[0])}await c.query('COMMIT');res.status(201).json(rows)}catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e);res.status(e.status||500).json({error:e.message||'Could not save batch photos'})}finally{c.release()}});
+const batchPatchSchema=z.object({title:z.string().trim().max(180).optional(),suggested_title:z.string().trim().max(180).nullable().optional(),category:z.string().trim().max(80).optional(),condition:z.string().trim().max(80).optional(),quantity:z.number().int().min(1).max(9999).optional(),price_cents:z.number().int().min(0).nullable().optional(),suggested_price_cents:z.number().int().min(0).nullable().optional(),market_low_cents:z.number().int().min(0).nullable().optional(),market_high_cents:z.number().int().min(0).nullable().optional(),confidence:z.number().min(0).max(1).nullable().optional(),source_label:z.string().max(120).nullable().optional(),status:z.enum(['pending','analyzed','reviewed','published','error']).optional(),notes:z.string().max(1000).optional()});
+app.patch('/api/batch-items/:id',auth,requireRole('manager'),async(req,res)=>{const p=batchPatchSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid batch item changes'});const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});const vals=[];const sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.params.id);const {rows}=await pool.query(`UPDATE batch_items SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:'Batch item not found'});res.json(rows[0])});
+app.post('/api/batch-items/:id/analyze',auth,requireRole('manager'),async(req,res)=>{const item=(await pool.query('SELECT * FROM batch_items WHERE id=$1',[req.params.id])).rows[0];if(!item)return res.status(404).json({error:'Batch item not found'});const analyzer=process.env.BATCH_ANALYZER_URL?.trim();if(!analyzer)return res.status(503).json({error:'Automatic image identification is ready to connect, but BATCH_ANALYZER_URL is not configured yet.',needs_configuration:true});try{const headers={'Content-Type':'application/json'};if(process.env.BATCH_ANALYZER_SECRET)headers.Authorization='Bearer '+process.env.BATCH_ANALYZER_SECRET;let analyzerImage=item.image_data;
+  if(/^https?:\/\//i.test(analyzerImage)){const ir=await fetch(analyzerImage);if(ir.ok){const ct=ir.headers.get('content-type')||'image/jpeg';analyzerImage=`data:${ct};base64,${Buffer.from(await ir.arrayBuffer()).toString('base64')}`}}
+  const r=await fetch(analyzer,{method:'POST',headers,body:JSON.stringify({filename:item.filename,image_data:analyzerImage})});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Analyzer request failed');const clean={suggested_title:String(j.title||'').slice(0,180)||null,title:String(j.title||'').slice(0,180)||item.title,category:String(j.category||'Other').slice(0,80),condition:String(j.condition||'Good').slice(0,80),suggested_price_cents:Number.isFinite(Number(j.suggested_price_cents))?Math.max(0,Math.round(Number(j.suggested_price_cents))):null,price_cents:Number.isFinite(Number(j.suggested_price_cents))?Math.max(0,Math.round(Number(j.suggested_price_cents))):item.price_cents,market_low_cents:Number.isFinite(Number(j.market_low_cents))?Math.max(0,Math.round(Number(j.market_low_cents))):null,market_high_cents:Number.isFinite(Number(j.market_high_cents))?Math.max(0,Math.round(Number(j.market_high_cents))):null,confidence:Number.isFinite(Number(j.confidence))?Math.max(0,Math.min(1,Number(j.confidence))):null,source_label:String(j.source_label||'Automated lookup').slice(0,120),status:'analyzed'};const {rows}=await pool.query(`UPDATE batch_items SET suggested_title=$1,title=$2,category=$3,condition=$4,suggested_price_cents=$5,price_cents=$6,market_low_cents=$7,market_high_cents=$8,confidence=$9,source_label=$10,status=$11,updated_at=now() WHERE id=$12 RETURNING *`,[clean.suggested_title,clean.title,clean.category,clean.condition,clean.suggested_price_cents,clean.price_cents,clean.market_low_cents,clean.market_high_cents,clean.confidence,clean.source_label,clean.status,item.id]);res.json(rows[0])}catch(e){console.error(e);await pool.query("UPDATE batch_items SET status='error',updated_at=now() WHERE id=$1",[item.id]);res.status(502).json({error:'Automatic lookup failed: '+e.message})}});
+app.post('/api/batches/:id/publish',auth,requireRole('manager'),async(req,res)=>{const p=z.object({item_ids:z.array(z.string().uuid()).min(1).max(500)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Choose at least one batch item'});const c=await pool.connect();try{await c.query('BEGIN');const published=[];const skipped=[];for(const id of p.data.item_ids){const x=(await c.query('SELECT * FROM batch_items WHERE id=$1 AND batch_id=$2 FOR UPDATE',[id,req.params.id])).rows[0];if(!x){skipped.push({id,reason:'not found'});continue}if(!x.title?.trim()||x.price_cents==null){skipped.push({id,reason:'title and price required'});continue}if(['Firearms','Ammunition'].includes(x.category)){skipped.push({id,reason:'regulated items require manual inventory review'});continue}const inv=(await c.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible) VALUES($1,$2,$3,0,$4,NULL,NULL,$5,1,$6,$7,$8,$9,NULL,false,false,true) RETURNING id,title`,[x.title.trim(),x.category||'Other',x.quantity||1,x.price_cents,(x.quantity||1)>1?'quantity':'individual',x.notes||'',x.image_data,JSON.stringify([x.image_data]),x.condition||'Good'])).rows[0];await c.query("UPDATE batch_items SET status='published',inventory_id=$1,updated_at=now() WHERE id=$2",[inv.id,x.id]);published.push(inv)}await c.query(`UPDATE batch_uploads SET status=CASE WHEN NOT EXISTS(SELECT 1 FROM batch_items WHERE batch_id=$1 AND status<>'published') THEN 'published' ELSE 'review' END,updated_at=now() WHERE id=$1`,[req.params.id]);await c.query('COMMIT');res.json({published,skipped})}catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e);res.status(500).json({error:'Could not publish batch inventory'})}finally{c.release()}});
+
+
+app.post('/api/admin/migrate-images-to-r2',auth,requireRole('admin'),async(req,res)=>{
+  if(!r2Config())return res.status(503).json({error:'Configure R2 environment variables on Render first.'});
+  const result={inventory_images:0,batch_images:0,items_changed:0,errors:[]};
+  const inv=(await pool.query('SELECT id,image_url,image_urls FROM inventory ORDER BY created_at')).rows;
+  for(const row of inv){
+    try{
+      let changed=false;
+      let main=row.image_url;
+      let gallery=Array.isArray(row.image_urls)?row.image_urls:[];
+      if(typeof main==='string'&&main.startsWith('data:image/')){main=await storeImageRef(main,'inventory');result.inventory_images++;changed=true}
+      const newGallery=[];
+      for(const v of gallery){
+        if(typeof v==='string'&&v.startsWith('data:image/')){newGallery.push(await storeImageRef(v,'inventory'));result.inventory_images++;changed=true}
+        else newGallery.push(v);
+      }
+      if(changed){await pool.query('UPDATE inventory SET image_url=$1,image_urls=$2,updated_at=now() WHERE id=$3',[main,JSON.stringify(newGallery),row.id]);result.items_changed++}
+    }catch(e){result.errors.push({type:'inventory',id:row.id,error:e.message})}
+  }
+  const batch=(await pool.query("SELECT id,image_data FROM batch_items WHERE image_data LIKE 'data:image/%' ORDER BY created_at")).rows;
+  for(const row of batch){
+    try{
+      const url=await storeImageRef(row.image_data,'batch-migration');
+      await pool.query('UPDATE batch_items SET image_data=$1,updated_at=now() WHERE id=$2',[url,row.id]);
+      result.batch_images++;result.items_changed++;
+    }catch(e){result.errors.push({type:'batch',id:row.id,error:e.message})}
+  }
+  await audit(req,'MIGRATE','images',null,result);
+  res.json(result);
 });
 
 app.get('/api/audit',auth,requireRole('admin'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,user_id,action,entity_type,entity_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 500');res.json(rows);});
