@@ -16,6 +16,8 @@ import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const { Pool } = pg;
 const app = express();
@@ -34,6 +36,78 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 async function ensureSchema(){ const schema=await fs.readFile(path.join(__dirname,'schema.sql'),'utf8'); await pool.query(schema); }
+
+// ---------- CLOUDFLARE R2 IMAGE STORAGE ----------
+function r2Config(){
+  const accountId=process.env.R2_ACCOUNT_ID?.trim();
+  const accessKeyId=process.env.R2_ACCESS_KEY_ID?.trim();
+  const secretAccessKey=process.env.R2_SECRET_ACCESS_KEY?.trim();
+  const bucket=process.env.R2_BUCKET_NAME?.trim();
+  const publicBase=process.env.R2_PUBLIC_BASE_URL?.trim()?.replace(/\/+$/,'');
+  if(!accountId||!accessKeyId||!secretAccessKey||!bucket||!publicBase)return null;
+  return {accountId,accessKeyId,secretAccessKey,bucket,publicBase};
+}
+let _r2Client=null;
+function getR2(){
+  const cfg=r2Config();
+  if(!cfg)throw Object.assign(new Error('R2 image storage is not configured.'),{status:503});
+  if(!_r2Client)_r2Client=new S3Client({region:'auto',endpoint:`https://${cfg.accountId}.r2.cloudflarestorage.com`,credentials:{accessKeyId:cfg.accessKeyId,secretAccessKey:cfg.secretAccessKey}});
+  return {client:_r2Client,cfg};
+}
+function decodeImageDataUri(v){
+  const m=String(v||'').match(/^data:image\/(jpeg|jpg|png|webp);base64,(.+)$/is);
+  if(!m)return null;
+  const type=m[1].toLowerCase()==='jpg'?'jpeg':m[1].toLowerCase();
+  return {body:Buffer.from(m[2],'base64'),contentType:`image/${type}`,ext:type==='jpeg'?'jpg':type};
+}
+async function storeImageRef(v,prefix='inventory'){
+  if(!v)return null;
+  if(/^https?:\/\//i.test(String(v)))return String(v);
+  const img=decodeImageDataUri(v);
+  if(!img)throw Object.assign(new Error('Unsupported image format.'),{status:400});
+  const {client,cfg}=getR2();
+  const key=`${prefix}/${new Date().toISOString().slice(0,10)}/${randomUUID()}.${img.ext}`;
+  await client.send(new PutObjectCommand({Bucket:cfg.bucket,Key:key,Body:img.body,ContentType:img.contentType,CacheControl:'public, max-age=31536000, immutable'}));
+  return `${cfg.publicBase}/${key}`;
+}
+async function urlToDataUri(url){
+  const r=await fetch(url);
+  if(!r.ok)throw new Error('Could not read stored image for analysis.');
+  const buf=Buffer.from(await r.arrayBuffer());
+  if(buf.length>2*1024*1024)throw new Error('Stored image is too large for analyzer transfer.');
+  const ct=(r.headers.get('content-type')||'image/jpeg').split(';')[0];
+  return `data:${ct};base64,${buf.toString('base64')}`;
+}
+let r2MigrationRunning=false;
+async function migrateImagesToR2(){
+  if(r2MigrationRunning)return {running:true};
+  if(!r2Config())return {configured:false,migrated_inventory:0,migrated_batch:0,errors:[]};
+  r2MigrationRunning=true;
+  let migratedInventory=0,migratedBatch=0;const errors=[];
+  try{
+    const invRows=(await pool.query(`SELECT id,image_url,image_urls FROM inventory WHERE image_url LIKE 'data:image/%' OR image_urls::text LIKE '%data:image/%' ORDER BY updated_at`)).rows;
+    for(const row of invRows){
+      try{
+        let primary=row.image_url;
+        if(typeof primary==='string'&&primary.startsWith('data:image/'))primary=await storeImageRef(primary,`inventory/${row.id}`);
+        let arr=[];
+        if(Array.isArray(row.image_urls))arr=row.image_urls;
+        else if(row.image_urls){try{arr=JSON.parse(row.image_urls)}catch{arr=[]}}
+        const out=[];
+        for(const v of arr){out.push(typeof v==='string'&&v.startsWith('data:image/')?await storeImageRef(v,`inventory/${row.id}`):v)}
+        if(!primary&&out[0])primary=out[0];
+        await pool.query('UPDATE inventory SET image_url=$1,image_urls=$2,updated_at=now() WHERE id=$3',[primary||null,JSON.stringify(out),row.id]);
+        migratedInventory++;
+      }catch(e){errors.push(`inventory ${row.id}: ${e.message}`)}
+    }
+    const batchRows=(await pool.query(`SELECT id,image_data FROM batch_items WHERE image_data LIKE 'data:image/%' ORDER BY created_at`)).rows;
+    for(const row of batchRows){
+      try{const url=await storeImageRef(row.image_data,'batch-migration');await pool.query('UPDATE batch_items SET image_data=$1,updated_at=now() WHERE id=$2',[url,row.id]);migratedBatch++}
+      catch(e){errors.push(`batch ${row.id}: ${e.message}`)}
+    }
+    return {configured:true,migrated_inventory:migratedInventory,migrated_batch:migratedBatch,errors};
+  }finally{r2MigrationRunning=false}
+}
 
 app.set('trust proxy', 1);
 app.use(express.static(path.join(__dirname,'..')));
@@ -137,8 +211,11 @@ app.post('/api/auth/login', loginLimit, async (req,res)=>{
 app.get('/api/me',auth,(req,res)=>res.json({user:req.user}));
 
 app.get('/api/public/inventory',async (_req,res)=>{
+  const started=Date.now();
   const {rows}=await pool.query(`SELECT id,title,category,quantity,price_cents,price_label,sale_price_cents,sku,item_type,condition,description,image_url,image_urls,regulated,featured,created_at,updated_at,low_stock FROM inventory WHERE public_visible=true AND quantity>0 ORDER BY updated_at DESC`);
+  res.set('Cache-Control','public, max-age=15, s-maxage=30');
   res.json(rows);
+  const ms=Date.now()-started;if(ms>1000)console.warn(`Slow public inventory response: ${ms}ms, ${rows.length} items`);
 });
 app.get('/api/public/store-config',(_req,res)=>res.json({mobilepawn_url:process.env.MOBILEPAWN_URL||null,mobilepawn_enabled:!!process.env.MOBILEPAWN_URL}));
 
@@ -932,11 +1009,25 @@ const batchItemSchema=z.object({filename:z.string().trim().max(255).default('pho
 app.get('/api/batches',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query(`SELECT b.*,COUNT(bi.id)::int AS item_count,COUNT(bi.id) FILTER (WHERE bi.status='published')::int AS published_count FROM batch_uploads b LEFT JOIN batch_items bi ON bi.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 100`);res.json(rows)});
 app.post('/api/batches',auth,requireRole('manager'),async(req,res)=>{const p=batchCreateSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Batch name is required'});const {rows}=await pool.query('INSERT INTO batch_uploads(name,created_by) VALUES($1,$2) RETURNING *',[p.data.name,req.user.sub]);res.status(201).json(rows[0])});
 app.get('/api/batches/:id/items',auth,requireRole('viewer'),async(req,res)=>{const {rows}=await pool.query('SELECT * FROM batch_items WHERE batch_id=$1 ORDER BY created_at,id',[req.params.id]);res.json(rows)});
-app.post('/api/batches/:id/items',auth,requireRole('manager'),async(req,res)=>{const p=z.object({items:z.array(batchItemSchema).min(1).max(25)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Upload up to 25 compressed JPG/PNG/WebP images at a time'});const batch=(await pool.query('SELECT id FROM batch_uploads WHERE id=$1',[req.params.id])).rows[0];if(!batch)return res.status(404).json({error:'Batch not found'});const c=await pool.connect();try{await c.query('BEGIN');const rows=[];for(const x of p.data.items){rows.push((await c.query(`INSERT INTO batch_items(batch_id,filename,image_data) VALUES($1,$2,$3) RETURNING *`,[batch.id,x.filename,x.image_data])).rows[0])}await c.query('COMMIT');res.status(201).json(rows)}catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e);res.status(500).json({error:'Could not save batch photos'})}finally{c.release()}});
+app.post('/api/batches/:id/items',auth,requireRole('manager'),async(req,res)=>{const p=z.object({items:z.array(batchItemSchema).min(1).max(25)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Upload up to 25 compressed JPG/PNG/WebP images at a time'});const batch=(await pool.query('SELECT id FROM batch_uploads WHERE id=$1',[req.params.id])).rows[0];if(!batch)return res.status(404).json({error:'Batch not found'});const c=await pool.connect();try{await c.query('BEGIN');const rows=[];for(const x of p.data.items){const imageUrl=await storeImageRef(x.image_data,`batches/${batch.id}`);rows.push((await c.query(`INSERT INTO batch_items(batch_id,filename,image_data) VALUES($1,$2,$3) RETURNING *`,[batch.id,x.filename,imageUrl])).rows[0])}await c.query('COMMIT');res.status(201).json(rows)}catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e);res.status(500).json({error:'Could not save batch photos'})}finally{c.release()}});
 const batchPatchSchema=z.object({title:z.string().trim().max(180).optional(),suggested_title:z.string().trim().max(180).nullable().optional(),category:z.string().trim().max(80).optional(),condition:z.string().trim().max(80).optional(),quantity:z.number().int().min(1).max(9999).optional(),price_cents:z.number().int().min(0).nullable().optional(),suggested_price_cents:z.number().int().min(0).nullable().optional(),market_low_cents:z.number().int().min(0).nullable().optional(),market_high_cents:z.number().int().min(0).nullable().optional(),confidence:z.number().min(0).max(1).nullable().optional(),source_label:z.string().max(120).nullable().optional(),status:z.enum(['pending','analyzed','reviewed','published','error']).optional(),notes:z.string().max(1000).optional(),shipping_profile:z.enum(['auto','small','medium','large','oversize','guitar','console']).optional()});
 app.patch('/api/batch-items/:id',auth,requireRole('manager'),async(req,res)=>{const p=batchPatchSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid batch item changes'});const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});const vals=[];const sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});vals.push(req.params.id);const {rows}=await pool.query(`UPDATE batch_items SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals);if(!rows[0])return res.status(404).json({error:'Batch item not found'});res.json(rows[0])});
-app.post('/api/batch-items/:id/analyze',auth,requireRole('manager'),async(req,res)=>{const item=(await pool.query('SELECT * FROM batch_items WHERE id=$1',[req.params.id])).rows[0];if(!item)return res.status(404).json({error:'Batch item not found'});const analyzer=process.env.BATCH_ANALYZER_URL?.trim();if(!analyzer)return res.status(503).json({error:'Automatic image identification is ready to connect, but BATCH_ANALYZER_URL is not configured yet.',needs_configuration:true});try{const headers={'Content-Type':'application/json'};if(process.env.BATCH_ANALYZER_SECRET)headers.Authorization='Bearer '+process.env.BATCH_ANALYZER_SECRET;const r=await fetch(analyzer,{method:'POST',headers,body:JSON.stringify({filename:item.filename,image_data:item.image_data})});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Analyzer request failed');const clean={suggested_title:String(j.title||'').slice(0,180)||null,title:String(j.title||'').slice(0,180)||item.title,category:String(j.category||'Other').slice(0,80),condition:String(j.condition||'Good').slice(0,80),suggested_price_cents:Number.isFinite(Number(j.suggested_price_cents))?Math.max(0,Math.round(Number(j.suggested_price_cents))):null,price_cents:Number.isFinite(Number(j.suggested_price_cents))?Math.max(0,Math.round(Number(j.suggested_price_cents))):item.price_cents,market_low_cents:Number.isFinite(Number(j.market_low_cents))?Math.max(0,Math.round(Number(j.market_low_cents))):null,market_high_cents:Number.isFinite(Number(j.market_high_cents))?Math.max(0,Math.round(Number(j.market_high_cents))):null,confidence:Number.isFinite(Number(j.confidence))?Math.max(0,Math.min(1,Number(j.confidence))):null,source_label:String(j.source_label||'Automated lookup').slice(0,120),status:'analyzed'};const {rows}=await pool.query(`UPDATE batch_items SET suggested_title=$1,title=$2,category=$3,condition=$4,suggested_price_cents=$5,price_cents=$6,market_low_cents=$7,market_high_cents=$8,confidence=$9,source_label=$10,status=$11,updated_at=now() WHERE id=$12 RETURNING *`,[clean.suggested_title,clean.title,clean.category,clean.condition,clean.suggested_price_cents,clean.price_cents,clean.market_low_cents,clean.market_high_cents,clean.confidence,clean.source_label,clean.status,item.id]);res.json(rows[0])}catch(e){console.error(e);await pool.query("UPDATE batch_items SET status='error',updated_at=now() WHERE id=$1",[item.id]);res.status(502).json({error:'Automatic lookup failed: '+e.message})}});
+app.post('/api/batch-items/:id/analyze',auth,requireRole('manager'),async(req,res)=>{const item=(await pool.query('SELECT * FROM batch_items WHERE id=$1',[req.params.id])).rows[0];if(!item)return res.status(404).json({error:'Batch item not found'});const analyzer=process.env.BATCH_ANALYZER_URL?.trim();if(!analyzer)return res.status(503).json({error:'Automatic image identification is ready to connect, but BATCH_ANALYZER_URL is not configured yet.',needs_configuration:true});try{const headers={'Content-Type':'application/json'};if(process.env.BATCH_ANALYZER_SECRET)headers.Authorization='Bearer '+process.env.BATCH_ANALYZER_SECRET;const analyzerImage=/^https?:\/\//i.test(String(item.image_data||''))?await urlToDataUri(item.image_data):item.image_data;const r=await fetch(analyzer,{method:'POST',headers,body:JSON.stringify({filename:item.filename,image_data:analyzerImage})});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Analyzer request failed');const clean={suggested_title:String(j.title||'').slice(0,180)||null,title:String(j.title||'').slice(0,180)||item.title,category:String(j.category||'Other').slice(0,80),condition:String(j.condition||'Good').slice(0,80),suggested_price_cents:Number.isFinite(Number(j.suggested_price_cents))?Math.max(0,Math.round(Number(j.suggested_price_cents))):null,price_cents:Number.isFinite(Number(j.suggested_price_cents))?Math.max(0,Math.round(Number(j.suggested_price_cents))):item.price_cents,market_low_cents:Number.isFinite(Number(j.market_low_cents))?Math.max(0,Math.round(Number(j.market_low_cents))):null,market_high_cents:Number.isFinite(Number(j.market_high_cents))?Math.max(0,Math.round(Number(j.market_high_cents))):null,confidence:Number.isFinite(Number(j.confidence))?Math.max(0,Math.min(1,Number(j.confidence))):null,source_label:String(j.source_label||'Automated lookup').slice(0,120),status:'analyzed'};const {rows}=await pool.query(`UPDATE batch_items SET suggested_title=$1,title=$2,category=$3,condition=$4,suggested_price_cents=$5,price_cents=$6,market_low_cents=$7,market_high_cents=$8,confidence=$9,source_label=$10,status=$11,updated_at=now() WHERE id=$12 RETURNING *`,[clean.suggested_title,clean.title,clean.category,clean.condition,clean.suggested_price_cents,clean.price_cents,clean.market_low_cents,clean.market_high_cents,clean.confidence,clean.source_label,clean.status,item.id]);res.json(rows[0])}catch(e){console.error(e);await pool.query("UPDATE batch_items SET status='error',updated_at=now() WHERE id=$1",[item.id]);res.status(502).json({error:'Automatic lookup failed: '+e.message})}});
 app.post('/api/batches/:id/publish',auth,requireRole('manager'),async(req,res)=>{const p=z.object({item_ids:z.array(z.string().uuid()).min(1).max(500)}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Choose at least one batch item'});const c=await pool.connect();try{await c.query('BEGIN');const published=[];const skipped=[];for(const id of p.data.item_ids){const x=(await c.query('SELECT * FROM batch_items WHERE id=$1 AND batch_id=$2 FOR UPDATE',[id,req.params.id])).rows[0];if(!x){skipped.push({id,reason:'not found'});continue}if(!x.title?.trim()||x.price_cents==null){skipped.push({id,reason:'title and price required'});continue}if(['Firearms','Ammunition'].includes(x.category)){skipped.push({id,reason:'regulated items require manual inventory review'});continue}const inv=(await c.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible,shipping_profile) VALUES($1,$2,$3,0,$4,NULL,NULL,$5,1,$6,$7,$8,$9,NULL,false,false,true,$10) RETURNING id,title`,[x.title.trim(),x.category||'Other',x.quantity||1,x.price_cents,(x.quantity||1)>1?'quantity':'individual',x.notes||'',x.image_data,JSON.stringify([x.image_data]),x.condition||'Good',x.shipping_profile||'auto'])).rows[0];await c.query("UPDATE batch_items SET status='published',inventory_id=$1,updated_at=now() WHERE id=$2",[inv.id,x.id]);published.push(inv)}await c.query(`UPDATE batch_uploads SET status=CASE WHEN NOT EXISTS(SELECT 1 FROM batch_items WHERE batch_id=$1 AND status<>'published') THEN 'published' ELSE 'review' END,updated_at=now() WHERE id=$1`,[req.params.id]);await c.query('COMMIT');res.json({published,skipped})}catch(e){try{await c.query('ROLLBACK')}catch{};console.error(e);res.status(500).json({error:'Could not publish batch inventory'})}finally{c.release()}});
+
+
+// ---------- R2 IMAGE MIGRATION / STATUS ----------
+app.get('/api/admin/r2/status',auth,requireRole('manager'),async(_req,res)=>{
+  try{
+    const inv=(await pool.query(`SELECT COUNT(*)::int AS n FROM inventory WHERE image_url LIKE 'data:image/%' OR image_urls::text LIKE '%data:image/%'`)).rows[0].n;
+    const batch=(await pool.query(`SELECT COUNT(*)::int AS n FROM batch_items WHERE image_data LIKE 'data:image/%'`)).rows[0].n;
+    res.json({configured:!!r2Config(),running:r2MigrationRunning,inventory_base64_remaining:inv,batch_base64_remaining:batch,public_base_url:r2Config()?.publicBase||null});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not check R2 migration status'})}
+});
+app.post('/api/admin/r2/migrate',auth,requireRole('manager'),async(_req,res)=>{
+  if(!r2Config())return res.status(503).json({error:'R2 environment variables are not configured.'});
+  try{res.json(await migrateImagesToR2())}catch(e){console.error(e);res.status(500).json({error:e.message||'Image migration failed'})}
+});
 
 
 // ---------- YEAR-END SALES / TAX REPORTING ----------
@@ -971,4 +1062,4 @@ app.get('/api/reports/year-end',auth,requireRole('manager'),async(req,res)=>{
 
 app.get('/api/audit',auth,requireRole('admin'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,user_id,action,entity_type,entity_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 500');res.json(rows);});
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).json({error:'Internal server error'});});
-ensureSchema().then(()=>ensureBootstrapAdmin()).then(()=>app.listen(port,'0.0.0.0',()=>console.log(`Pink Elephant API listening on ${port}`))).catch(err=>{console.error(err);process.exit(1)});
+ensureSchema().then(()=>ensureBootstrapAdmin()).then(()=>app.listen(port,'0.0.0.0',()=>{console.log(`Pink Elephant API listening on ${port}`);if(r2Config())setTimeout(()=>migrateImagesToR2().then(r=>console.log('R2 image migration complete',r)).catch(e=>console.error('R2 image migration failed',e)),1500)})).catch(err=>{console.error(err);process.exit(1)});
