@@ -46,7 +46,7 @@ body{background:#050506;color:#fff;font-family:Arial,Helvetica,sans-serif}
 .peMainNav{display:flex;justify-content:center;gap:34px;align-items:center;font-size:14px;font-weight:900}
 .peMainNav a{position:relative;padding:34px 0 30px;color:#f0f0f2}.peMainNav a:hover,.peMainNav a.active{color:#fff}
 .peMainNav a.active:after,.peMainNav a:hover:after{content:"";position:absolute;left:0;right:0;bottom:16px;height:3px;background:var(--pePink)}
-.peNavActions{display:flex;gap:14px;align-items:center}.peIconBtn,.peCartTop{border:0;background:transparent;color:#fff;font-size:25px;cursor:pointer;position:relative}
+.peNavActions{display:flex;gap:14px;align-items:center}.peMobilePawnTop{display:inline-flex;align-items:center;justify-content:center;padding:9px 13px;border:2px solid var(--pePink);border-radius:7px;color:#fff;font-size:12px;font-weight:900;white-space:nowrap;background:#111}.peMobilePawnTop:hover{background:var(--pePink);color:#fff}.peIconBtn,.peCartTop{border:0;background:transparent;color:#fff;font-size:25px;cursor:pointer;position:relative}
 .peCartTop .cartCount{position:absolute;right:-9px;top:-7px;background:var(--pePink);color:#fff;min-width:17px;height:17px;font-size:10px}
 body>div[style*="position:fixed"][style*="bottom:18px"]{display:none!important}
 
@@ -196,6 +196,7 @@ body.peCategoryPage #inventory .head h2{
     </nav>
 
     <div class="peNavActions">
+      <a class="peMobilePawnTop" href="https://play.google.com/store/apps/details?id=com.bravorevolution.instapawn" target="_blank" rel="noopener" onclick="return openMobilePawnDownload(event)">MOBILEPAWN</a>
       <a class="peIconBtn" href="#inventory" aria-label="Search inventory">⌕</a>
       <button class="peIconBtn" onclick="peOpenAccount()" type="button" aria-label="Customer account">♙</button>
       <button class="peCartTop" onclick="openCart()" type="button" aria-label="Open cart">🛒<span class="cartCount" id="cartCount">0</span></button>
