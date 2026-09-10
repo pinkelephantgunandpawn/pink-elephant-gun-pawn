@@ -15,6 +15,7 @@
 @media(max-width:650px){.fflForm{grid-template-columns:1fr}.fflForm .full{grid-column:auto}}
 
 .fflSteps{display:flex;gap:7px;margin:14px 0 18px;flex-wrap:wrap}.fflStep{flex:1;min-width:120px;border:1px solid var(--line);border-radius:10px;padding:9px;text-align:center;color:var(--m);font-size:12px;font-weight:900}.fflStep.active{background:var(--p);color:#16070f;border-color:var(--p)}.checkoutSection{border-top:1px solid var(--line);padding:18px 0}.checkoutSection:first-of-type{border-top:0}.checkoutSection h3{margin:0 0 10px;font-size:20px}.deliveryChoice{display:grid;grid-template-columns:1fr 1fr;gap:10px}.deliveryCard{border:1px solid var(--line);background:#0b0b0e;border-radius:12px;padding:14px;cursor:pointer}.deliveryCard.selected{border-color:var(--p);box-shadow:0 0 0 1px var(--p) inset}.dealerFinder{display:none;margin-top:14px}.dealerFinder.show{display:block}.dealerSearch{display:flex;gap:8px}.dealerSearch input{flex:1}.dealerResults{max-height:300px;overflow:auto;margin-top:10px;border:1px solid var(--line);border-radius:10px}.dealerRow{padding:12px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}.dealerRow:last-child{border-bottom:0}.dealerRow.selected{background:#2b1622}.dealerBadges{display:flex;gap:5px;flex-wrap:wrap;margin-top:5px}.dealerBadge{font-size:10px;border-radius:999px;padding:4px 7px;background:#2a2a31}.dealerBadge.preferred{background:var(--p);color:#16070f}.selectedDealer{margin-top:10px;border:1px solid #4a3240;border-radius:10px;padding:12px;background:#170f14}.secureRow{display:flex;gap:10px;align-items:flex-start;background:#0b0b0e;border:1px solid var(--line);padding:12px;border-radius:10px}.paymentPlaceholder{border:1px dashed #5b5b66;border-radius:12px;padding:14px;color:var(--m)}
+.fortisPayBtn{width:100%;border:0;border-radius:9px;padding:14px 16px;background:#e86aa7;color:#16070f;font-weight:900;font-size:16px;cursor:pointer}.fortisPayBtn:disabled{opacity:.55;cursor:not-allowed}.fortisFrameWrap{display:none;margin-top:12px;border:1px solid #393941;border-radius:12px;overflow:hidden;background:#fff}.fortisFrameWrap.show{display:block}.fortisFrame{display:block;width:100%;height:650px;border:0;background:#fff}.fortisAlt{margin-top:12px;padding-top:12px;border-top:1px solid #303038}
 @media(max-width:650px){.deliveryChoice{grid-template-columns:1fr}.dealerSearch{display:grid}}
 </style>
 <style id="storeQolStyles">
@@ -280,9 +281,10 @@ body.peCategoryPage #inventory .head h2{
 <button class="quoteShipBtn" id="quoteShipBtn" onclick="loadShippingRates()" type="button">GET SHIPPING RATES</button>
 <div class="shippingRates" id="shippingRates"></div>
 <textarea class="full" maxlength="1000" name="notes" placeholder="Order notes (optional)"></textarea>
-<div class="full smallNote" id="paypalCheckoutNote">Pay securely with PayPal. Firearms and ammunition are not eligible for PayPal checkout.</div>
+<div class="full smallNote" id="fortisCheckoutNote">Pay securely by credit or debit card through Fortis. Card details are entered directly on the Fortis hosted payment page and do not pass through Pink Elephant's server.</div>
 <div class="full checkoutMsg" id="checkoutMsg"></div>
-<div class="full" id="paypal-button-container"></div>
+<div class="full"><button class="fortisPayBtn" id="fortisPayBtn" type="button" onclick="startFortisCheckout()">PAY SECURELY WITH CARD</button><div class="fortisFrameWrap" id="fortisFrameWrap"><iframe class="fortisFrame" id="fortisFrame" title="Secure Fortis payment"></iframe></div></div>
+<div class="full fortisAlt"><div class="smallNote" id="paypalCheckoutNote">Alternate payment: PayPal is available for eligible non-regulated merchandise.</div><div id="paypal-button-container"></div></div>
 </form>
 </div>
 </div>
@@ -401,9 +403,9 @@ function openCheckout(){
   document.getElementById('checkoutMsg').className='full checkoutMsg';
   document.getElementById('checkoutModal').classList.add('open');
   document.body.style.overflow='hidden';
-  toggleShipping();loadPayPalCheckout()
+  toggleShipping();loadFortisCheckout();loadPayPalCheckout()
 }
-function closeCheckout(){document.getElementById('checkoutModal').classList.remove('open');document.body.style.overflow=''}
+function closeCheckout(){if(fortisCheckoutToken)cancelFortisCheckout();document.getElementById('fortisFrameWrap')?.classList.remove('show');const ff=document.getElementById('fortisFrame');if(ff)ff.src='about:blank';const fb=document.getElementById('fortisPayBtn');if(fb){fb.style.display='';fb.disabled=false;fb.textContent='PAY SECURELY WITH CARD'}document.getElementById('checkoutModal').classList.remove('open');document.body.style.overflow=''}
 function checkoutPayload(){
   const form=document.getElementById('checkoutForm'),f=new FormData(form);
   return {
@@ -424,6 +426,50 @@ function validatePayPalCheckout(){
   if(f.get('fulfillment')==='shipping'&&!selectedShippingRate){msg.className='full checkoutMsg show bad';msg.textContent='Click GET SHIPPING RATES and choose a shipping option first.';return false}
   msg.className='full checkoutMsg';msg.textContent='';return true;
 }
+
+let fortisConfig=null,fortisCheckoutToken=null,fortisMessageOrigin='https://api.fortispay.com';
+async function loadFortisCheckout(){
+  const btn=document.getElementById('fortisPayBtn'),note=document.getElementById('fortisCheckoutNote');
+  try{
+    const r=await fetch(API+'/api/public/fortis/config'),cfg=await r.json().catch(()=>({}));fortisConfig=cfg;
+    if(!r.ok||!cfg.enabled)throw Error(cfg.error||'Fortis checkout is not configured yet.');
+    btn.disabled=false;btn.style.display='';note.style.color='';note.textContent=cfg.mode==='sandbox'?'FORTIS TEST MODE — card payments are running against the sandbox.':'Pay securely by credit or debit card through Fortis. Card details are entered directly on the Fortis hosted payment page and do not pass through Pink Elephant\'s server.';
+  }catch(err){btn.disabled=true;note.textContent=err.message||'Secure card checkout is temporarily unavailable.';note.style.color='#ff9b9b'}
+}
+async function startFortisCheckout(){
+  if(!validatePayPalCheckout())return;
+  const btn=document.getElementById('fortisPayBtn'),msg=document.getElementById('checkoutMsg'),wrap=document.getElementById('fortisFrameWrap'),frame=document.getElementById('fortisFrame');
+  btn.disabled=true;btn.textContent='OPENING SECURE PAYMENT…';msg.className='full checkoutMsg show';msg.textContent='Preparing your secure Fortis payment page…';
+  try{
+    const token=localStorage.getItem('pe_customer_token');
+    const r=await fetch(API+'/api/public/fortis/start',{method:'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:JSON.stringify(checkoutPayload())}),j=await r.json().catch(()=>({}));
+    if(!r.ok)throw Error(j.error||'Could not start secure card checkout.');
+    fortisCheckoutToken=j.checkout_token;try{fortisMessageOrigin=new URL(j.url).origin}catch(_){}
+    frame.src=j.url;wrap.classList.add('show');msg.className='full checkoutMsg show';msg.innerHTML=`Order <b>${esc(j.order_number)}</b> is reserved for 45 minutes. Complete payment below.`;btn.style.display='none';
+    setTimeout(()=>frame.scrollIntoView({behavior:'smooth',block:'start'}),150);
+  }catch(err){btn.disabled=false;btn.textContent='PAY SECURELY WITH CARD';msg.className='full checkoutMsg show bad';msg.textContent=err.message||'Could not start secure card checkout.'}
+}
+async function cancelFortisCheckout(){
+  if(!fortisCheckoutToken)return;const t=fortisCheckoutToken;fortisCheckoutToken=null;
+  try{await fetch(API+'/api/public/fortis/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({checkout_token:t})})}catch(_){}
+}
+window.addEventListener('message',async event=>{
+  if(event.origin!==fortisMessageOrigin||!fortisCheckoutToken)return;
+  let payload=event.data;try{if(typeof payload==='string')payload=JSON.parse(payload)}catch(_){return}
+  const tx=payload?.transaction||payload?.data?.transaction||payload?.data||payload;
+  const transactionId=String(tx?.id||tx?.transaction_id||'').trim();const statusId=Number(tx?.status_id||0);
+  if(!transactionId)return;
+  const msg=document.getElementById('checkoutMsg'),wrap=document.getElementById('fortisFrameWrap');
+  if(statusId&&statusId!==101){msg.className='full checkoutMsg show bad';msg.textContent='Fortis did not approve this payment. You can review the payment form and try again.';return}
+  msg.className='full checkoutMsg show';msg.textContent='Payment approved. Verifying it securely with Fortis…';
+  try{
+    const customerToken=localStorage.getItem('pe_customer_token');
+    const r=await fetch(API+'/api/public/fortis/confirm',{method:'POST',headers:{'Content-Type':'application/json',...(customerToken?{Authorization:'Bearer '+customerToken}:{})},body:JSON.stringify({checkout_token:fortisCheckoutToken,transaction_id:transactionId})}),j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Could not verify the Fortis payment.');
+    fortisCheckoutToken=null;msg.className='full checkoutMsg show good';msg.innerHTML=`<b>Payment complete!</b><br>Order #${esc(j.order_number)} has been securely paid through Fortis. We’ll contact you with the next ${checkoutPayload().fulfillment==='shipping'?'shipping':'pickup'} update.`;
+    cart=[];saveCart();document.getElementById('checkoutForm').reset();selectedShippingRate=null;pickupTaxPreview=null;toggleShipping();wrap.classList.remove('show');document.getElementById('fortisFrame').src='about:blank';
+  }catch(err){msg.className='full checkoutMsg show bad';msg.innerHTML=`<b>Payment verification needs attention.</b><br>${esc(err.message||'Could not verify payment.')}<br><span class="smallNote">Do not submit a second payment until Pink Elephant confirms the first transaction.</span>`}
+},false);
+
 let paypalLoading=null,paypalButtonsRendered=false,paypalConfig=null;
 async function loadPayPalCheckout(){
   if(paypalButtonsRendered)return;
