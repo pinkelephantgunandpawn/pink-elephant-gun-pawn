@@ -343,3 +343,22 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS paypal_refund_id text;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS refund_status text;
 CREATE INDEX IF NOT EXISTS orders_paypal_capture_idx ON orders(paypal_capture_id);
 CREATE INDEX IF NOT EXISTS orders_paypal_refund_idx ON orders(paypal_refund_id);
+
+
+-- FORTIS HOSTED PAYMENT PAGE CHECKOUT SESSIONS
+CREATE TABLE IF NOT EXISTS fortis_checkout_sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_number text UNIQUE NOT NULL,
+  payload jsonb NOT NULL,
+  priced jsonb NOT NULL,
+  expected_total_cents integer NOT NULL CHECK (expected_total_cents >= 0),
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','completed','released')),
+  transaction_id text,
+  order_id uuid REFERENCES orders(id) ON DELETE SET NULL,
+  release_reason text,
+  expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS fortis_checkout_transaction_uq ON fortis_checkout_sessions(transaction_id) WHERE transaction_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS fortis_checkout_expiry_idx ON fortis_checkout_sessions(status,expires_at);
