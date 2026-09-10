@@ -16,7 +16,7 @@ import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, createHash, createCipheriv } from 'node:crypto';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const { Pool } = pg;
@@ -334,6 +334,60 @@ async function verifyShippoRate(rateId,shipmentId){
 }
 
 
+
+// ---------- FORTIS HOSTED PAYMENT PAGE ----------
+function fortisHppConfig(){
+  const id=String(process.env.FORTIS_HPP_ID||'').trim();
+  const encryptionKey=String(process.env.FORTIS_HPP_ENCRYPTION_KEY||'').trim();
+  const base=String(process.env.FORTIS_HPP_BASE_URL||'https://api.fortispay.com').trim().replace(/\/+$/,'');
+  return {id,encryptionKey,base,configured:!!(id&&encryptionKey)};
+}
+function fortisApiConfig(){
+  const developerId=String(process.env.FORTIS_DEVELOPER_ID||'').trim();
+  const userId=String(process.env.FORTIS_USER_ID||'').trim();
+  const userApiKey=String(process.env.FORTIS_USER_API_KEY||'').trim();
+  const locationId=String(process.env.FORTIS_LOCATION_ID||'').trim();
+  const base=String(process.env.FORTIS_API_BASE_URL||'https://api.fortispay.com').trim().replace(/\/+$/,'');
+  return {developerId,userId,userApiKey,locationId,base,configured:!!(developerId&&userId&&userApiKey)};
+}
+function fortisReady(){return fortisHppConfig().configured&&fortisApiConfig().configured}
+function fortisOpenSslAesEncrypt(plainText,passphrase){
+  const salt=randomBytes(8);let material=Buffer.alloc(0),prev=Buffer.alloc(0);const pass=Buffer.from(String(passphrase),'utf8');
+  while(material.length<48){prev=createHash('md5').update(Buffer.concat([prev,pass,salt])).digest();material=Buffer.concat([material,prev])}
+  const key=material.subarray(0,32),iv=material.subarray(32,48);const cipher=createCipheriv('aes-256-cbc',key,iv);const encrypted=Buffer.concat([cipher.update(String(plainText),'utf8'),cipher.final()]);
+  return Buffer.concat([Buffer.from('Salted__'),salt,encrypted]).toString('base64');
+}
+function fortisHppUrl(data){
+  const cfg=fortisHppConfig();
+  if(!cfg.configured)throw Object.assign(new Error('Fortis Hosted Payment Page is not configured.'),{status:503});
+  const encrypted=fortisOpenSslAesEncrypt(JSON.stringify(data),cfg.encryptionKey);
+  return `${cfg.base}/hostedpaymentpage?id=${encodeURIComponent(cfg.id)}&data=${encodeURIComponent(encrypted)}`;
+}
+async function fortisApiGet(pathname){
+  const cfg=fortisApiConfig();
+  if(!cfg.configured)throw Object.assign(new Error('Fortis API verification credentials are not configured.'),{status:503});
+  const r=await fetch(cfg.base+pathname,{headers:{'developer-id':cfg.developerId,'user-id':cfg.userId,'user-api-key':cfg.userApiKey,'Accept':'application/json','Cache-Control':'no-cache'}});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){const detail=j?.message||j?.error||`Fortis verification failed (${r.status}).`;throw Object.assign(new Error(detail),{status:r.status===401||r.status===403?503:502})}
+  return j;
+}
+async function releaseFortisSession(sessionId,reason='expired'){
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const s=(await c.query("SELECT * FROM fortis_checkout_sessions WHERE id=$1 FOR UPDATE",[sessionId])).rows[0];
+    if(!s||s.status!=='pending'){await c.query('ROLLBACK');return false}
+    const priced=s.priced||{};const items=Array.isArray(priced.items)?priced.items:[];
+    for(const item of items){const id=item?.inv?.id||item?.inventory_id;if(id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[Number(item.quantity||1),id])}
+    await c.query("UPDATE fortis_checkout_sessions SET status='released',release_reason=$2,updated_at=now() WHERE id=$1",[sessionId,reason]);
+    await c.query('COMMIT');return true;
+  }catch(e){try{await c.query('ROLLBACK')}catch{};throw e}finally{c.release()}
+}
+async function cleanupFortisSessions(){
+  const {rows}=await pool.query("SELECT id FROM fortis_checkout_sessions WHERE status='pending' AND expires_at<now() LIMIT 50");
+  for(const row of rows){try{await releaseFortisSession(row.id,'expired')}catch(e){console.error('FORTIS RELEASE',e)}}
+}
+
 function paypalMode(){return String(process.env.PAYPAL_MODE||'sandbox').trim().toLowerCase()==='live'?'live':'sandbox'}
 function paypalApiBase(){return paypalMode()==='live'?'https://api-m.paypal.com':'https://api-m.sandbox.paypal.com'}
 function paypalConfigured(){return !!(process.env.PAYPAL_CLIENT_ID&&process.env.PAYPAL_CLIENT_SECRET)}
@@ -548,6 +602,65 @@ app.get('/api/customer/orders',customerAuth,async(req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:'Could not load orders'})}
 });
 
+
+
+app.get('/api/public/fortis/config',(_req,res)=>{
+  const hpp=fortisHppConfig(),api=fortisApiConfig();
+  res.status(fortisReady()?200:503).json({enabled:fortisReady(),hpp_ready:hpp.configured,verification_ready:api.configured,mode:hpp.base.includes('sandbox')?'sandbox':'live',error:fortisReady()?null:'Fortis setup is incomplete. HPP and API verification credentials are both required.'});
+});
+
+app.post('/api/public/fortis/start',checkoutLimit,async(req,res)=>{
+  if(!fortisReady())return res.status(503).json({error:'Fortis checkout is not fully configured yet.'});
+  const p=publicOrderSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Please check the checkout information and try again.'});
+  if(p.data.fulfillment==='shipping'&&!p.data.shipping)return res.status(400).json({error:'Shipping address is required.'});
+  if(p.data.fulfillment==='shipping'&&!p.data.shippo_rate_id)return res.status(400).json({error:'Choose a shipping rate before paying.'});
+  await cleanupFortisSessions().catch(console.error);
+  const c=await pool.connect();let session=null;
+  try{
+    await c.query('BEGIN');
+    const priced=await pricePublicCheckout(p.data,{lockClient:c});
+    for(const item of priced.items)await c.query('UPDATE inventory SET quantity=quantity-$1,updated_at=now() WHERE id=$2',[item.quantity,item.inv.id]);
+    const orderNumber='PE-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
+    session=(await c.query(`INSERT INTO fortis_checkout_sessions(order_number,payload,priced,expected_total_cents,expires_at) VALUES($1,$2,$3,$4,now()+interval '45 minutes') RETURNING id,order_number,expected_total_cents,expires_at`,[orderNumber,JSON.stringify(p.data),JSON.stringify(priced),priced.total])).rows[0];
+    await c.query('COMMIT');
+    const amount=(Number(session.expected_total_cents)/100).toFixed(2);
+    const hpp=fortisHppConfig();
+    const data={id:hpp.id,parent_send_message:1,redirect_url_delay:2,field_configuration:{body:{fields:[{id:'transaction_amount',label:'Amount',value:amount,readonly:true,visible:true},{id:'action',value:'sale',visible:false},{id:'description',value:`Pink Elephant order ${orderNumber}`,visible:false},{id:'order_num',value:orderNumber,visible:false}]}}};
+    const checkoutToken=jwt.sign({type:'fortis_checkout',session_id:session.id},process.env.JWT_SECRET,{expiresIn:'50m'});
+    res.json({url:fortisHppUrl(data),checkout_token:checkoutToken,order_number:orderNumber,total_cents:Number(session.expected_total_cents),expires_at:session.expires_at});
+  }catch(e){try{await c.query('ROLLBACK')}catch{};console.error('FORTIS START',e);res.status(e.status||500).json({error:e.message||'Could not start secure card checkout.'})}finally{c.release()}
+});
+
+app.post('/api/public/fortis/cancel',checkoutLimit,async(req,res)=>{
+  try{const d=jwt.verify(String(req.body?.checkout_token||''),process.env.JWT_SECRET);if(d.type!=='fortis_checkout'||!d.session_id)throw Error('Invalid checkout token');await releaseFortisSession(d.session_id,'customer_cancelled');res.json({released:true})}catch(e){res.status(400).json({error:'Could not cancel this checkout session.'})}
+});
+
+app.post('/api/public/fortis/confirm',checkoutLimit,async(req,res)=>{
+  try{
+    const d=jwt.verify(String(req.body?.checkout_token||''),process.env.JWT_SECRET);if(d.type!=='fortis_checkout'||!d.session_id)throw Object.assign(new Error('Invalid checkout session.'),{status:400});
+    const transactionId=String(req.body?.transaction_id||'').trim();if(!/^[A-Za-z0-9-]{8,80}$/.test(transactionId))throw Object.assign(new Error('Invalid Fortis transaction reference.'),{status:400});
+    const session=(await pool.query('SELECT * FROM fortis_checkout_sessions WHERE id=$1',[d.session_id])).rows[0];if(!session)throw Object.assign(new Error('Checkout session was not found.'),{status:404});
+    if(session.status==='completed'&&session.order_id){const o=(await pool.query('SELECT * FROM orders WHERE id=$1',[session.order_id])).rows[0];return res.json({order_number:o.order_number,total_cents:o.total_cents,payment_status:o.payment_status,transaction_id:transactionId})}
+    if(session.status!=='pending')throw Object.assign(new Error('This checkout session is no longer active.'),{status:409});
+    const raw=await fortisApiGet('/v2/transactions/'+encodeURIComponent(transactionId));const tx=raw?.transaction||raw;
+    if(Number(tx?.status_id)!==101)throw Object.assign(new Error('Fortis has not confirmed this card payment as approved.'),{status:409});
+    const expected=Number(session.expected_total_cents);const txCents=Math.round(Number(tx?.transaction_amount||0)*100);const subtotalCents=Math.round(Number(tx?.subtotal_amount||0)*100);
+    if(txCents!==expected&&subtotalCents!==expected)throw Object.assign(new Error('The Fortis payment amount does not match this order.'),{status:409});
+    const apiCfg=fortisApiConfig();if(apiCfg.locationId&&tx?.location_id&&String(tx.location_id)!==apiCfg.locationId)throw Object.assign(new Error('The Fortis payment belongs to a different merchant location.'),{status:409});
+    if(tx?.order_num&&String(tx.order_num)!==String(session.order_number))throw Object.assign(new Error('The Fortis payment reference does not match this order.'),{status:409});
+    const existing=(await pool.query("SELECT * FROM orders WHERE payment_provider='fortis' AND payment_reference=$1",[transactionId])).rows[0];if(existing)return res.json({order_number:existing.order_number,total_cents:existing.total_cents,payment_status:existing.payment_status,transaction_id:transactionId});
+    const payload=session.payload,priced=session.priced;let checkoutCustomerId=null;try{const rawAuth=req.headers.authorization||'';if(rawAuth.startsWith('Bearer ')){const u=jwt.verify(rawAuth.slice(7),process.env.JWT_SECRET);if(u.type==='customer'&&u.customer_id)checkoutCustomerId=Number(u.customer_id)}}catch(_){}
+    const c=await pool.connect();let order;
+    try{
+      await c.query('BEGIN');const lockedSession=(await c.query('SELECT * FROM fortis_checkout_sessions WHERE id=$1 FOR UPDATE',[session.id])).rows[0];if(!lockedSession||lockedSession.status!=='pending')throw Object.assign(new Error('This checkout was already completed or released.'),{status:409});
+      const shippingAddress=payload.fulfillment==='shipping'?payload.shipping:null;
+      order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service,customer_id,tax_state,tax_rate_bps_snapshot,payment_provider,payment_reference,payment_status,paid_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'fortis',$19,'paid',now()) RETURNING *`,[lockedSession.order_number,payload.customer.name,payload.customer.email.toLowerCase(),payload.customer.phone,payload.fulfillment,shippingAddress,payload.notes,priced.subtotal,priced.tax.tax_cents,priced.shippingCents,priced.total,priced.verifiedShipping?.rate_id||null,priced.verifiedShipping?.shipment_id||null,priced.verifiedShipping?.provider||null,priced.verifiedShipping?.service||null,checkoutCustomerId,priced.tax.state||null,priced.tax.rate_bps??null,transactionId])).rows[0];
+      for(const item of priced.items)await c.query(`INSERT INTO order_items(order_id,inventory_id,item_title,quantity,unit_price_cents,line_total_cents) VALUES($1,$2,$3,$4,$5,$6)`,[order.id,item.inv.id,item.inv.title,item.quantity,item.unit,item.line]);
+      await c.query("UPDATE fortis_checkout_sessions SET status='completed',transaction_id=$2,order_id=$3,updated_at=now() WHERE id=$1",[lockedSession.id,transactionId,order.id]);await c.query('COMMIT');
+    }catch(e){try{await c.query('ROLLBACK')}catch{};throw e}finally{c.release()}
+    sendOrderConfirmation(order.id).catch(console.error);res.json({order_number:order.order_number,total_cents:order.total_cents,payment_status:'paid',transaction_id:transactionId});
+  }catch(e){console.error('FORTIS CONFIRM',e);res.status(e.status||500).json({error:e.message||'Could not verify Fortis payment.'})}
+});
 
 app.get('/api/public/paypal/config',(_req,res)=>{
   if(!paypalConfigured())return res.status(503).json({enabled:false,error:'PayPal is not configured.'});
