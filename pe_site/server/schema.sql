@@ -345,7 +345,7 @@ CREATE INDEX IF NOT EXISTS orders_paypal_capture_idx ON orders(paypal_capture_id
 CREATE INDEX IF NOT EXISTS orders_paypal_refund_idx ON orders(paypal_refund_id);
 
 
--- FORTIS HOSTED PAYMENT PAGE CHECKOUT SESSIONS
+-- FORTIS.TECH ELEMENTS CHECKOUT SESSIONS
 CREATE TABLE IF NOT EXISTS fortis_checkout_sessions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   order_number text UNIQUE NOT NULL,
@@ -362,3 +362,14 @@ CREATE TABLE IF NOT EXISTS fortis_checkout_sessions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS fortis_checkout_transaction_uq ON fortis_checkout_sessions(transaction_id) WHERE transaction_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS fortis_checkout_expiry_idx ON fortis_checkout_sessions(status,expires_at);
+
+ALTER TABLE fortis_checkout_sessions ADD COLUMN IF NOT EXISTS checkout_kind text NOT NULL DEFAULT 'merchandise';
+ALTER TABLE fortis_checkout_sessions ADD COLUMN IF NOT EXISTS ffl_request_id uuid REFERENCES ffl_requests(id) ON DELETE SET NULL;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_provider text;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_reference text;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS paid_at timestamptz;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS subtotal_cents integer;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS tax_cents integer;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS shipping_cents integer;
+CREATE UNIQUE INDEX IF NOT EXISTS ffl_requests_payment_reference_uq ON ffl_requests(payment_provider,payment_reference) WHERE payment_provider IS NOT NULL AND payment_reference IS NOT NULL;
+
