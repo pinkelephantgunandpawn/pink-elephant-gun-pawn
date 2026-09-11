@@ -16,7 +16,7 @@ import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID, randomBytes, createHash, createCipheriv } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const { Pool } = pg;
@@ -335,41 +335,63 @@ async function verifyShippoRate(rateId,shipmentId){
 
 
 
-// ---------- FORTIS HOSTED PAYMENT PAGE ----------
-function fortisHppConfig(){
-  const id=String(process.env.FORTIS_HPP_ID||'').trim();
-  const encryptionKey=String(process.env.FORTIS_HPP_ENCRYPTION_KEY||'').trim();
-  const base=String(process.env.FORTIS_HPP_BASE_URL||'https://api.fortispay.com').trim().replace(/\/+$/,'');
-  return {id,encryptionKey,base,configured:!!(id&&encryptionKey)};
+// ---------- FORTIS.TECH ELEMENTS CHECKOUT ----------
+// Current Fortis.Tech integration: Elements Transaction Intention (action: sale).
+// Card data is captured inside Fortis Commerce.js Elements and never passes through this server.
+function fortisTechConfig(){
+  const base=String(process.env.FORTIS_TECH_BASE_URL||'https://api.sandbox.fortis.tech').trim().replace(/\/+$/,'');
+  const developerId=String(process.env.FORTIS_TECH_DEVELOPER_ID||'').trim();
+  const userId=String(process.env.FORTIS_TECH_USER_ID||'').trim();
+  const userApiKey=String(process.env.FORTIS_TECH_USER_API_KEY||'').trim();
+  const locationId=String(process.env.FORTIS_TECH_LOCATION_ID||'').trim();
+  const productTransactionId=String(process.env.FORTIS_TECH_PRODUCT_TRANSACTION_ID||'').trim();
+  const sandbox=/sandbox/i.test(base);
+  return {base,developerId,userId,userApiKey,locationId,productTransactionId,sandbox,configured:!!(developerId&&userId&&userApiKey&&locationId&&productTransactionId)};
 }
-function fortisApiConfig(){
-  const developerId=String(process.env.FORTIS_DEVELOPER_ID||'').trim();
-  const userId=String(process.env.FORTIS_USER_ID||'').trim();
-  const userApiKey=String(process.env.FORTIS_USER_API_KEY||'').trim();
-  const locationId=String(process.env.FORTIS_LOCATION_ID||'').trim();
-  const base=String(process.env.FORTIS_API_BASE_URL||'https://api.fortispay.com').trim().replace(/\/+$/,'');
-  return {developerId,userId,userApiKey,locationId,base,configured:!!(developerId&&userId&&userApiKey)};
-}
-function fortisReady(){return fortisHppConfig().configured&&fortisApiConfig().configured}
-function fortisOpenSslAesEncrypt(plainText,passphrase){
-  const salt=randomBytes(8);let material=Buffer.alloc(0),prev=Buffer.alloc(0);const pass=Buffer.from(String(passphrase),'utf8');
-  while(material.length<48){prev=createHash('md5').update(Buffer.concat([prev,pass,salt])).digest();material=Buffer.concat([material,prev])}
-  const key=material.subarray(0,32),iv=material.subarray(32,48);const cipher=createCipheriv('aes-256-cbc',key,iv);const encrypted=Buffer.concat([cipher.update(String(plainText),'utf8'),cipher.final()]);
-  return Buffer.concat([Buffer.from('Salted__'),salt,encrypted]).toString('base64');
-}
-function fortisHppUrl(data){
-  const cfg=fortisHppConfig();
-  if(!cfg.configured)throw Object.assign(new Error('Fortis Hosted Payment Page is not configured.'),{status:503});
-  const encrypted=fortisOpenSslAesEncrypt(JSON.stringify(data),cfg.encryptionKey);
-  return `${cfg.base}/hostedpaymentpage?id=${encodeURIComponent(cfg.id)}&data=${encodeURIComponent(encrypted)}`;
-}
-async function fortisApiGet(pathname){
-  const cfg=fortisApiConfig();
-  if(!cfg.configured)throw Object.assign(new Error('Fortis API verification credentials are not configured.'),{status:503});
-  const r=await fetch(cfg.base+pathname,{headers:{'developer-id':cfg.developerId,'user-id':cfg.userId,'user-api-key':cfg.userApiKey,'Accept':'application/json','Cache-Control':'no-cache'}});
+function fortisReady(){return fortisTechConfig().configured}
+function fortisElementsJsUrl(){return fortisTechConfig().sandbox?'https://js.sandbox.fortis.tech/commercejs-v1.0.0.min.js':'https://js.fortis.tech/commercejs-v1.0.0.min.js'}
+async function fortisTechRequest(pathname,{method='GET',body=null}={}){
+  const cfg=fortisTechConfig();
+  if(!cfg.configured)throw Object.assign(new Error('Fortis.Tech credentials are not fully configured.'),{status:503});
+  const r=await fetch(cfg.base+pathname,{method,headers:{'developer-id':cfg.developerId,'user-id':cfg.userId,'user-api-key':cfg.userApiKey,'Accept':'application/json','Content-Type':'application/json','Cache-Control':'no-cache'},body:body?JSON.stringify(body):undefined});
   const j=await r.json().catch(()=>({}));
-  if(!r.ok){const detail=j?.message||j?.error||`Fortis verification failed (${r.status}).`;throw Object.assign(new Error(detail),{status:r.status===401||r.status===403?503:502})}
+  if(!r.ok){
+    const detail=j?.message||j?.error||j?.detail||j?.errors?.[0]?.message||`Fortis.Tech request failed (${r.status}).`;
+    const e=new Error(detail);e.status=(r.status===401||r.status===403)?503:502;e.fortis=j;throw e;
+  }
   return j;
+}
+async function createFortisIntention(){
+  const cfg=fortisTechConfig();
+  // Fortis.Tech Elements Transaction Intention. The amount/order details are supplied to Commerce.js Elements.
+  const body={action:'sale',location_id:cfg.locationId,methods:[{type:'cc',product_transaction_id:cfg.productTransactionId}]};
+  const raw=await fortisTechRequest('/v1/elements/transaction-intention',{method:'POST',body});
+  const data=raw?.data||raw?.transaction_intention||raw;
+  const clientToken=data?.client_token||data?.clientToken;
+  if(!clientToken)throw Object.assign(new Error('Fortis.Tech did not return an Elements client token.'),{status:502});
+  return {clientToken,raw};
+}
+async function fortisTechGetTransaction(transactionId){
+  const raw=await fortisTechRequest('/v1/transactions/'+encodeURIComponent(transactionId));
+  return raw?.data||raw?.transaction||raw;
+}
+function fortisAmountToCents(value){
+  const n=Number(value);if(!Number.isFinite(n))return null;
+  // Fortis.Tech uses integer smallest-currency units. Keep a defensive dollars fallback for older response shapes.
+  return Number.isInteger(n)?n:Math.round(n*100);
+}
+function assertFortisTransaction(tx,session){
+  const cfg=fortisTechConfig();
+  const code=Number(tx?.status_code??tx?.statusCode??tx?.status_id??tx?.statusId??NaN);
+  const words=String(tx?.status||tx?.verbiage||'').toLowerCase();
+  if(code!==101&&!/(approved|success|settled)/.test(words))throw Object.assign(new Error('Fortis has not confirmed this card payment as approved.'),{status:409});
+  const expected=Number(session.expected_total_cents);
+  const amount=fortisAmountToCents(tx?.transaction_amount??tx?.transactionAmount??tx?.amount);
+  const subtotal=fortisAmountToCents(tx?.subtotal_amount??tx?.subtotalAmount);
+  if(amount!==expected&&subtotal!==expected)throw Object.assign(new Error('The Fortis payment amount does not match this checkout.'),{status:409});
+  const location=String(tx?.location_id??tx?.locationId??'');if(location&&location!==cfg.locationId)throw Object.assign(new Error('The Fortis payment belongs to a different merchant location.'),{status:409});
+  const product=String(tx?.product_transaction_id??tx?.productTransactionId??'');if(product&&product!==cfg.productTransactionId)throw Object.assign(new Error('The Fortis payment used an unexpected card product.'),{status:409});
+  const apiRef=String(tx?.transaction_api_id??tx?.transactionApiId??tx?.order_num??tx?.orderNumber??'');if(apiRef&&apiRef!==String(session.order_number))throw Object.assign(new Error('The Fortis payment reference does not match this checkout.'),{status:409});
 }
 async function releaseFortisSession(sessionId,reason='expired'){
   const c=await pool.connect();
@@ -605,30 +627,58 @@ app.get('/api/customer/orders',customerAuth,async(req,res)=>{
 
 
 app.get('/api/public/fortis/config',(_req,res)=>{
-  const hpp=fortisHppConfig(),api=fortisApiConfig();
-  res.status(fortisReady()?200:503).json({enabled:fortisReady(),hpp_ready:hpp.configured,verification_ready:api.configured,mode:hpp.base.includes('sandbox')?'sandbox':'live',error:fortisReady()?null:'Fortis setup is incomplete. HPP and API verification credentials are both required.'});
+  const cfg=fortisTechConfig();
+  res.status(cfg.configured?200:503).json({enabled:cfg.configured,mode:cfg.sandbox?'sandbox':'live',js_url:fortisElementsJsUrl(),error:cfg.configured?null:'Fortis.Tech Elements is not fully configured.'});
 });
 
+async function createFortisCheckoutSession({kind,payload,priced,orderNumber,client}){
+  for(const item of priced.items||[])await client.query('UPDATE inventory SET quantity=quantity-$1,updated_at=now() WHERE id=$2',[Number(item.quantity||1),item?.inv?.id||item.inventory_id]);
+  const wrappedPayload={kind,request:payload};
+  return (await client.query(`INSERT INTO fortis_checkout_sessions(order_number,payload,priced,expected_total_cents,checkout_kind,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '45 minutes') RETURNING id,order_number,expected_total_cents,expires_at`,[orderNumber,JSON.stringify(wrappedPayload),JSON.stringify(priced),priced.total,kind])).rows[0];
+}
+function fortisCheckoutResponse(session,intention){
+  const checkoutToken=jwt.sign({type:'fortis_checkout',session_id:session.id},process.env.JWT_SECRET,{expiresIn:'50m'});
+  return {client_token:intention.clientToken,checkout_token:checkoutToken,order_number:session.order_number,total_cents:Number(session.expected_total_cents),expires_at:session.expires_at,js_url:fortisElementsJsUrl(),mode:fortisTechConfig().sandbox?'sandbox':'live'};
+}
+
 app.post('/api/public/fortis/start',checkoutLimit,async(req,res)=>{
-  if(!fortisReady())return res.status(503).json({error:'Fortis checkout is not fully configured yet.'});
+  if(!fortisReady())return res.status(503).json({error:'Fortis.Tech Elements is not fully configured yet.'});
   const p=publicOrderSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Please check the checkout information and try again.'});
   if(p.data.fulfillment==='shipping'&&!p.data.shipping)return res.status(400).json({error:'Shipping address is required.'});
   if(p.data.fulfillment==='shipping'&&!p.data.shippo_rate_id)return res.status(400).json({error:'Choose a shipping rate before paying.'});
   await cleanupFortisSessions().catch(console.error);
-  const c=await pool.connect();let session=null;
+  const c=await pool.connect();let session;
   try{
     await c.query('BEGIN');
     const priced=await pricePublicCheckout(p.data,{lockClient:c});
-    for(const item of priced.items)await c.query('UPDATE inventory SET quantity=quantity-$1,updated_at=now() WHERE id=$2',[item.quantity,item.inv.id]);
     const orderNumber='PE-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
-    session=(await c.query(`INSERT INTO fortis_checkout_sessions(order_number,payload,priced,expected_total_cents,expires_at) VALUES($1,$2,$3,$4,now()+interval '45 minutes') RETURNING id,order_number,expected_total_cents,expires_at`,[orderNumber,JSON.stringify(p.data),JSON.stringify(priced),priced.total])).rows[0];
+    session=await createFortisCheckoutSession({kind:'merchandise',payload:p.data,priced,orderNumber,client:c});
     await c.query('COMMIT');
-    const amount=(Number(session.expected_total_cents)/100).toFixed(2);
-    const hpp=fortisHppConfig();
-    const data={id:hpp.id,parent_send_message:1,redirect_url_delay:2,field_configuration:{body:{fields:[{id:'transaction_amount',label:'Amount',value:amount,readonly:true,visible:true},{id:'action',value:'sale',visible:false},{id:'description',value:`Pink Elephant order ${orderNumber}`,visible:false},{id:'order_num',value:orderNumber,visible:false}]}}};
-    const checkoutToken=jwt.sign({type:'fortis_checkout',session_id:session.id},process.env.JWT_SECRET,{expiresIn:'50m'});
-    res.json({url:fortisHppUrl(data),checkout_token:checkoutToken,order_number:orderNumber,total_cents:Number(session.expected_total_cents),expires_at:session.expires_at});
+    try{const intention=await createFortisIntention();return res.json(fortisCheckoutResponse(session,intention))}catch(e){await releaseFortisSession(session.id,'fortis_intention_failed').catch(console.error);throw e}
   }catch(e){try{await c.query('ROLLBACK')}catch{};console.error('FORTIS START',e);res.status(e.status||500).json({error:e.message||'Could not start secure card checkout.'})}finally{c.release()}
+});
+
+app.post('/api/public/fortis/firearm/start',checkoutLimit,async(req,res)=>{
+  if(!fortisReady())return res.status(503).json({error:'Fortis.Tech Elements is not fully configured yet.'});
+  const p=fflRequestSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Please check every required firearm checkout field.'});
+  const dob=new Date(p.data.customer.date_of_birth+'T12:00:00Z');if(Number.isNaN(dob.getTime()))return res.status(400).json({error:'Enter a valid date of birth.'});
+  const now=new Date();let age=now.getUTCFullYear()-dob.getUTCFullYear();const m=now.getUTCMonth()-dob.getUTCMonth();if(m<0||(m===0&&now.getUTCDate()<dob.getUTCDate()))age--;if(age<18)return res.status(400).json({error:'Online firearm checkout cannot be used by a person under 18.'});
+  const residence=String(p.data.customer.residence_state||'').toUpperCase();if(!STATE_NAMES[residence])return res.status(400).json({error:'Choose a valid state of residence.'});
+  await cleanupFortisSessions().catch(console.error);
+  const c=await pool.connect();let session;
+  try{
+    await c.query('BEGIN');
+    const inv=(await c.query('SELECT id,title,regulated,quantity,public_visible,price_cents,sale_price_cents FROM inventory WHERE id=$1 FOR UPDATE',[p.data.inventory_id])).rows[0];
+    if(!inv||!inv.public_visible||inv.quantity<1)throw Object.assign(new Error('This item is no longer available.'),{status:404});if(!inv.regulated)throw Object.assign(new Error('This checkout is only for regulated items.'),{status:400});
+    let dealer=null;if(p.data.request_type==='ffl_transfer'){if(!p.data.dealer_id)throw Object.assign(new Error('Choose a receiving FFL dealer before continuing.'),{status:400});dealer=(await c.query('SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred,source,source_license_number,license_type FROM ffl_dealers WHERE id=$1 AND active=true',[p.data.dealer_id])).rows[0];if(!dealer)throw Object.assign(new Error('The selected FFL is unavailable. Please choose another dealer.'),{status:400});}
+    const subtotal=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);if(subtotal==null)throw Object.assign(new Error('This firearm requires store pricing.'),{status:400});
+    const destinationState=p.data.request_type==='store_pickup'?taxConfig().storeState:(dealer?.state||residence);const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents:0,state:destinationState,fulfillment:p.data.request_type==='store_pickup'?'pickup':'shipping'});
+    const priced={items:[{inv,unit:subtotal,quantity:1,line:subtotal}],subtotal,shippingCents:0,tax,total:subtotal+tax.tax_cents,dealer,destinationState};
+    const orderNumber='FFL-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
+    session=await createFortisCheckoutSession({kind:'firearm',payload:p.data,priced,orderNumber,client:c});
+    await c.query('COMMIT');
+    try{const intention=await createFortisIntention();return res.json({...fortisCheckoutResponse(session,intention),subtotal_cents:subtotal,tax_cents:tax.tax_cents,shipping_cents:0,shipping_deferred:p.data.request_type==='ffl_transfer'})}catch(e){await releaseFortisSession(session.id,'fortis_intention_failed').catch(console.error);throw e}
+  }catch(e){try{await c.query('ROLLBACK')}catch{};console.error('FORTIS FIREARM START',e);res.status(e.status||500).json({error:e.message||'Could not start firearm card checkout.'})}finally{c.release()}
 });
 
 app.post('/api/public/fortis/cancel',checkoutLimit,async(req,res)=>{
@@ -638,28 +688,32 @@ app.post('/api/public/fortis/cancel',checkoutLimit,async(req,res)=>{
 app.post('/api/public/fortis/confirm',checkoutLimit,async(req,res)=>{
   try{
     const d=jwt.verify(String(req.body?.checkout_token||''),process.env.JWT_SECRET);if(d.type!=='fortis_checkout'||!d.session_id)throw Object.assign(new Error('Invalid checkout session.'),{status:400});
-    const transactionId=String(req.body?.transaction_id||'').trim();if(!/^[A-Za-z0-9-]{8,80}$/.test(transactionId))throw Object.assign(new Error('Invalid Fortis transaction reference.'),{status:400});
+    const transactionId=String(req.body?.transaction_id||'').trim();if(!/^[A-Za-z0-9_-]{8,100}$/.test(transactionId))throw Object.assign(new Error('Invalid Fortis transaction reference.'),{status:400});
     const session=(await pool.query('SELECT * FROM fortis_checkout_sessions WHERE id=$1',[d.session_id])).rows[0];if(!session)throw Object.assign(new Error('Checkout session was not found.'),{status:404});
-    if(session.status==='completed'&&session.order_id){const o=(await pool.query('SELECT * FROM orders WHERE id=$1',[session.order_id])).rows[0];return res.json({order_number:o.order_number,total_cents:o.total_cents,payment_status:o.payment_status,transaction_id:transactionId})}
+    const wrapped=session.payload||{};const kind=session.checkout_kind||wrapped.kind||'merchandise';
+    if(session.status==='completed'){
+      if(kind==='firearm'&&session.ffl_request_id){const f=(await pool.query('SELECT request_number,quoted_total_cents,payment_status,compliance_status FROM ffl_requests WHERE id=$1',[session.ffl_request_id])).rows[0];return res.json({...f,transaction_id:transactionId,kind:'firearm'})}
+      if(session.order_id){const o=(await pool.query('SELECT * FROM orders WHERE id=$1',[session.order_id])).rows[0];return res.json({order_number:o.order_number,total_cents:o.total_cents,payment_status:o.payment_status,transaction_id:transactionId,kind:'merchandise'})}
+    }
     if(session.status!=='pending')throw Object.assign(new Error('This checkout session is no longer active.'),{status:409});
-    const raw=await fortisApiGet('/v2/transactions/'+encodeURIComponent(transactionId));const tx=raw?.transaction||raw;
-    if(Number(tx?.status_id)!==101)throw Object.assign(new Error('Fortis has not confirmed this card payment as approved.'),{status:409});
-    const expected=Number(session.expected_total_cents);const txCents=Math.round(Number(tx?.transaction_amount||0)*100);const subtotalCents=Math.round(Number(tx?.subtotal_amount||0)*100);
-    if(txCents!==expected&&subtotalCents!==expected)throw Object.assign(new Error('The Fortis payment amount does not match this order.'),{status:409});
-    const apiCfg=fortisApiConfig();if(apiCfg.locationId&&tx?.location_id&&String(tx.location_id)!==apiCfg.locationId)throw Object.assign(new Error('The Fortis payment belongs to a different merchant location.'),{status:409});
-    if(tx?.order_num&&String(tx.order_num)!==String(session.order_number))throw Object.assign(new Error('The Fortis payment reference does not match this order.'),{status:409});
-    const existing=(await pool.query("SELECT * FROM orders WHERE payment_provider='fortis' AND payment_reference=$1",[transactionId])).rows[0];if(existing)return res.json({order_number:existing.order_number,total_cents:existing.total_cents,payment_status:existing.payment_status,transaction_id:transactionId});
-    const payload=session.payload,priced=session.priced;let checkoutCustomerId=null;try{const rawAuth=req.headers.authorization||'';if(rawAuth.startsWith('Bearer ')){const u=jwt.verify(rawAuth.slice(7),process.env.JWT_SECRET);if(u.type==='customer'&&u.customer_id)checkoutCustomerId=Number(u.customer_id)}}catch(_){}
-    const c=await pool.connect();let order;
+    const tx=await fortisTechGetTransaction(transactionId);assertFortisTransaction(tx,session);
+    const existingOrder=(await pool.query("SELECT * FROM orders WHERE payment_provider='fortis_tech' AND payment_reference=$1",[transactionId])).rows[0];if(existingOrder)return res.json({order_number:existingOrder.order_number,total_cents:existingOrder.total_cents,payment_status:existingOrder.payment_status,transaction_id:transactionId,kind:'merchandise'});
+    const existingFfl=(await pool.query("SELECT * FROM ffl_requests WHERE payment_provider='fortis_tech' AND payment_reference=$1",[transactionId])).rows[0];if(existingFfl)return res.json({request_number:existingFfl.request_number,quoted_total_cents:existingFfl.quoted_total_cents,payment_status:existingFfl.payment_status,compliance_status:existingFfl.compliance_status,transaction_id:transactionId,kind:'firearm'});
+    const payload=wrapped.request||wrapped,priced=session.priced;const c=await pool.connect();
     try{
-      await c.query('BEGIN');const lockedSession=(await c.query('SELECT * FROM fortis_checkout_sessions WHERE id=$1 FOR UPDATE',[session.id])).rows[0];if(!lockedSession||lockedSession.status!=='pending')throw Object.assign(new Error('This checkout was already completed or released.'),{status:409});
+      await c.query('BEGIN');const locked=(await c.query('SELECT * FROM fortis_checkout_sessions WHERE id=$1 FOR UPDATE',[session.id])).rows[0];if(!locked||locked.status!=='pending')throw Object.assign(new Error('This checkout was already completed or released.'),{status:409});
+      if(kind==='firearm'){
+        const dealer=priced.dealer||null;const address={address1:payload.customer.address1||'',city:payload.customer.city||'',state:payload.customer.state||'',postal:payload.customer.postal||''};const residence=String(payload.customer.residence_state||'').toUpperCase();const inv=priced.items?.[0]?.inv;
+        const ffl=(await c.query(`INSERT INTO ffl_requests(request_number,inventory_id,item_title,customer_name,customer_email,customer_phone,request_type,destination_state,receiving_ffl_name,receiving_ffl_phone,receiving_ffl_number,receiving_ffl_license_type,notes,dealer_id,dealer_snapshot,customer_address,shipping_method,quoted_total_cents,age_certified,buyer_date_of_birth,buyer_residence_state,ffl_verified,compliance_status,payment_status,payment_provider,payment_reference,paid_at,subtotal_cents,tax_cents,shipping_cents) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,'hold','paid','fortis_tech',$23,now(),$24,$25,$26) RETURNING id,request_number,quoted_total_cents,payment_status,compliance_status`,[locked.order_number,inv?.id||payload.inventory_id,inv?.title||'Firearm',payload.customer.name,payload.customer.email.toLowerCase(),payload.customer.phone,payload.request_type,dealer?.state||residence,dealer?.name||payload.receiving_ffl_name||null,dealer?.phone||payload.receiving_ffl_phone||null,dealer?.source_license_number||null,dealer?.license_type||null,payload.notes,dealer?.id||null,dealer?JSON.stringify(dealer):null,JSON.stringify(address),payload.shipping_method,priced.total,payload.age_certified,payload.customer.date_of_birth,residence,payload.request_type==='ffl_transfer'?!!dealer?.license_on_file:false,transactionId,priced.subtotal,priced.tax?.tax_cents||0,priced.shippingCents||0])).rows[0];
+        await c.query("UPDATE fortis_checkout_sessions SET status='completed',transaction_id=$2,ffl_request_id=$3,updated_at=now() WHERE id=$1",[locked.id,transactionId,ffl.id]);await c.query('COMMIT');return res.json({...ffl,transaction_id:transactionId,kind:'firearm',shipping_deferred:payload.request_type==='ffl_transfer'});
+      }
+      let checkoutCustomerId=null;try{const rawAuth=req.headers.authorization||'';if(rawAuth.startsWith('Bearer ')){const u=jwt.verify(rawAuth.slice(7),process.env.JWT_SECRET);if(u.type==='customer'&&u.customer_id)checkoutCustomerId=Number(u.customer_id)}}catch(_){}
       const shippingAddress=payload.fulfillment==='shipping'?payload.shipping:null;
-      order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service,customer_id,tax_state,tax_rate_bps_snapshot,payment_provider,payment_reference,payment_status,paid_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'fortis',$19,'paid',now()) RETURNING *`,[lockedSession.order_number,payload.customer.name,payload.customer.email.toLowerCase(),payload.customer.phone,payload.fulfillment,shippingAddress,payload.notes,priced.subtotal,priced.tax.tax_cents,priced.shippingCents,priced.total,priced.verifiedShipping?.rate_id||null,priced.verifiedShipping?.shipment_id||null,priced.verifiedShipping?.provider||null,priced.verifiedShipping?.service||null,checkoutCustomerId,priced.tax.state||null,priced.tax.rate_bps??null,transactionId])).rows[0];
+      const order=(await c.query(`INSERT INTO orders(order_number,customer_name,customer_email,customer_phone,fulfillment,shipping_address,notes,subtotal_cents,tax_cents,shipping_cents,total_cents,shippo_rate_id,shippo_shipment_id,shipping_provider,shipping_service,customer_id,tax_state,tax_rate_bps_snapshot,payment_provider,payment_reference,payment_status,paid_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'fortis_tech',$19,'paid',now()) RETURNING *`,[locked.order_number,payload.customer.name,payload.customer.email.toLowerCase(),payload.customer.phone,payload.fulfillment,shippingAddress,payload.notes,priced.subtotal,priced.tax.tax_cents,priced.shippingCents,priced.total,priced.verifiedShipping?.rate_id||null,priced.verifiedShipping?.shipment_id||null,priced.verifiedShipping?.provider||null,priced.verifiedShipping?.service||null,checkoutCustomerId,priced.tax.state||null,priced.tax.rate_bps??null,transactionId])).rows[0];
       for(const item of priced.items)await c.query(`INSERT INTO order_items(order_id,inventory_id,item_title,quantity,unit_price_cents,line_total_cents) VALUES($1,$2,$3,$4,$5,$6)`,[order.id,item.inv.id,item.inv.title,item.quantity,item.unit,item.line]);
-      await c.query("UPDATE fortis_checkout_sessions SET status='completed',transaction_id=$2,order_id=$3,updated_at=now() WHERE id=$1",[lockedSession.id,transactionId,order.id]);await c.query('COMMIT');
+      await c.query("UPDATE fortis_checkout_sessions SET status='completed',transaction_id=$2,order_id=$3,updated_at=now() WHERE id=$1",[locked.id,transactionId,order.id]);await c.query('COMMIT');sendOrderConfirmation(order.id).catch(console.error);return res.json({order_number:order.order_number,total_cents:order.total_cents,payment_status:'paid',transaction_id:transactionId,kind:'merchandise'});
     }catch(e){try{await c.query('ROLLBACK')}catch{};throw e}finally{c.release()}
-    sendOrderConfirmation(order.id).catch(console.error);res.json({order_number:order.order_number,total_cents:order.total_cents,payment_status:'paid',transaction_id:transactionId});
-  }catch(e){console.error('FORTIS CONFIRM',e);res.status(e.status||500).json({error:e.message||'Could not verify Fortis payment.'})}
+  }catch(e){console.error('FORTIS CONFIRM',e);res.status(e.status||500).json({error:e.message||'Could not verify Fortis.Tech payment.'})}
 });
 
 app.get('/api/public/paypal/config',(_req,res)=>{
