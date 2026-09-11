@@ -365,7 +365,7 @@ async function createFortisIntention(){
   const cfg=fortisTechConfig();
   // Fortis.Tech Elements Transaction Intention. The amount/order details are supplied to Commerce.js Elements.
   const body={action:'sale',location_id:cfg.locationId,methods:[{type:'cc',product_transaction_id:cfg.productTransactionId}]};
-  const raw=await fortisTechRequest('/v1/elements/transaction-intention',{method:'POST',body});
+  const raw=await fortisTechRequest('/v1/element/transaction/intention',{method:'POST',body});
   const data=raw?.data||raw?.transaction_intention||raw;
   const clientToken=data?.client_token||data?.clientToken;
   if(!clientToken)throw Object.assign(new Error('Fortis.Tech did not return an Elements client token.'),{status:502});
