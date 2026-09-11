@@ -361,11 +361,13 @@ async function fortisTechRequest(pathname,{method='GET',body=null}={}){
   }
   return j;
 }
-async function createFortisIntention(){
+async function createFortisIntention(amountCents){
   const cfg=fortisTechConfig();
-  // Fortis.Tech Elements Transaction Intention. The amount/order details are supplied to Commerce.js Elements.
-  const body={action:'sale',location_id:cfg.locationId,methods:[{type:'cc',product_transaction_id:cfg.productTransactionId}]};
-  const raw=await fortisTechRequest('/v1/element/transaction/intention',{method:'POST',body});
+  const amount=Number(amountCents);
+  if(!Number.isInteger(amount)||amount<1)throw Object.assign(new Error('Fortis.Tech requires a valid transaction amount.'),{status:400});
+  // Fortis.Tech Elements Transaction Intention (official v1 flow). Amount is in smallest currency units (cents).
+  const body={action:'sale',amount,save_account:false,methods:[{type:'cc',product_transaction_id:cfg.productTransactionId}],location_id:cfg.locationId};
+  const raw=await fortisTechRequest('/v1/elements/transaction/intention',{method:'POST',body});
   const data=raw?.data||raw?.transaction_intention||raw;
   const clientToken=data?.client_token||data?.clientToken;
   if(!clientToken)throw Object.assign(new Error('Fortis.Tech did not return an Elements client token.'),{status:502});
@@ -654,7 +656,7 @@ app.post('/api/public/fortis/start',checkoutLimit,async(req,res)=>{
     const orderNumber='PE-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
     session=await createFortisCheckoutSession({kind:'merchandise',payload:p.data,priced,orderNumber,client:c});
     await c.query('COMMIT');
-    try{const intention=await createFortisIntention();return res.json(fortisCheckoutResponse(session,intention))}catch(e){await releaseFortisSession(session.id,'fortis_intention_failed').catch(console.error);throw e}
+    try{const intention=await createFortisIntention(Number(session.expected_total_cents));return res.json(fortisCheckoutResponse(session,intention))}catch(e){await releaseFortisSession(session.id,'fortis_intention_failed').catch(console.error);throw e}
   }catch(e){try{await c.query('ROLLBACK')}catch{};console.error('FORTIS START',e);res.status(e.status||500).json({error:e.message||'Could not start secure card checkout.'})}finally{c.release()}
 });
 
@@ -677,7 +679,7 @@ app.post('/api/public/fortis/firearm/start',checkoutLimit,async(req,res)=>{
     const orderNumber='FFL-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();
     session=await createFortisCheckoutSession({kind:'firearm',payload:p.data,priced,orderNumber,client:c});
     await c.query('COMMIT');
-    try{const intention=await createFortisIntention();return res.json({...fortisCheckoutResponse(session,intention),subtotal_cents:subtotal,tax_cents:tax.tax_cents,shipping_cents:0,shipping_deferred:p.data.request_type==='ffl_transfer'})}catch(e){await releaseFortisSession(session.id,'fortis_intention_failed').catch(console.error);throw e}
+    try{const intention=await createFortisIntention(Number(session.expected_total_cents));return res.json({...fortisCheckoutResponse(session,intention),subtotal_cents:subtotal,tax_cents:tax.tax_cents,shipping_cents:0,shipping_deferred:p.data.request_type==='ffl_transfer'})}catch(e){await releaseFortisSession(session.id,'fortis_intention_failed').catch(console.error);throw e}
   }catch(e){try{await c.query('ROLLBACK')}catch{};console.error('FORTIS FIREARM START',e);res.status(e.status||500).json({error:e.message||'Could not start firearm card checkout.'})}finally{c.release()}
 });
 
