@@ -262,7 +262,7 @@ body.peCategoryPage #inventory .head h2{
 <div class="modal" id="offerModal" style="display:none;position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;padding:18px;background:rgba(0,0,0,.86);"><div class="modalBox"><button class="modalClose" onclick="closeOffer()" type="button">✕</button><div class="eyebrow">Make an offer</div><h2 id="offerItemTitle">Make an Offer</h2><p class="muted" id="offerAsk"></p><form id="offerForm"><input id="offerInventoryId" name="inventory_id" type="hidden"/><div class="formGrid"><label>Name<input name="name" required=""/></label><label>Email<input name="email" required="" type="email"/></label><label>Phone<input name="phone"/></label><label>Your offer ($)<input min="1" name="offer" required="" step="0.01" type="number"/></label><label class="full">Message (optional)<textarea maxlength="1000" name="message" placeholder="Anything you'd like us to know"></textarea></label></div><div class="smallNote" id="offerMsg"></div><button class="btn" style="width:100%;margin-top:12px" type="submit">SEND OFFER</button></form></div></div><div class="cartPanel" id="cartPanel">
 <div class="cartHead"><div><b style="font-size:22px">Your Cart</b><div class="smallNote">Non-regulated merchandise only in Step 1.</div></div><button class="iconBtn" onclick="closeCart()">✕</button></div>
 <div class="cartBody" id="cartBody"></div>
-<div class="cartFoot"><div class="cartTotal"><span>Subtotal</span><span id="cartSubtotal">$0.00</span></div><div class="smallNote">Shipping and sales tax are calculated at checkout. Normal merchandise can be paid securely with PayPal.</div><button class="btn" onclick="openCheckout()" style="width:100%;margin-top:12px">CHECKOUT</button></div>
+<div class="cartFoot"><div class="cartTotal"><span>Subtotal</span><span id="cartSubtotal">$0.00</span></div><div class="smallNote">Shipping and sales tax are calculated at checkout. Cards are processed through Fortis.Tech; PayPal is available only for eligible non-regulated merchandise.</div><button class="btn" onclick="openCheckout()" style="width:100%;margin-top:12px">CHECKOUT</button></div>
 </div>
 <div class="checkoutBack" id="checkoutModal" onclick="if(event.target===this)closeCheckout()">
 <div class="checkoutBox">
@@ -284,7 +284,7 @@ body.peCategoryPage #inventory .head h2{
 <div class="full smallNote" id="fortisCheckoutNote">Pay securely by credit or debit card through Fortis. Card details are entered directly on the Fortis hosted payment page and do not pass through Pink Elephant's server.</div>
 <div class="full checkoutMsg" id="checkoutMsg"></div>
 <div class="full"><button class="fortisPayBtn" id="fortisPayBtn" type="button" onclick="startFortisCheckout()">PAY SECURELY WITH CARD</button><div class="fortisFrameWrap" id="fortisFrameWrap"><div class="fortisElements" id="fortisElements"></div></div></div>
-<div class="full fortisAlt"><div class="smallNote" id="paypalCheckoutNote">Alternate payment: PayPal is available for eligible non-regulated merchandise.</div><div id="paypal-button-container"></div></div>
+<div class="full fortisAlt" id="paypalCheckoutWrap"><div class="smallNote" id="paypalCheckoutNote">Alternate payment: PayPal is available for eligible non-regulated merchandise.</div><div id="paypal-button-container"></div></div>
 </form>
 </div>
 </div>
@@ -323,6 +323,12 @@ function effectivePrice(x){return x.sale_price_cents!=null?Number(x.sale_price_c
 function itemPrice(x){return effectivePrice(x)!=null?money(effectivePrice(x)):(x.price_label||'Call for price')}
 function priceHtml(x){return x.sale_price_cents!=null?`${money(x.sale_price_cents)} <span class="saleOld">${money(x.price_cents)}</span>`:esc(itemPrice(x))}
 function canBuy(x){return !x.regulated && effectivePrice(x)!=null && Number(x.quantity)>0}
+function cartInventoryItem(row){return data.find(x=>String(x.id)===String(row?.id))||null}
+function isFirearmItem(x){const c=String(x?.category||'').toLowerCase();return !!x&&(c.includes('firearm')||c.includes('handgun')||c.includes('rifle')||c.includes('shotgun')||c==='guns'||c==='gun')}
+function isPayPalIneligibleItem(x){const c=String(x?.category||'').toLowerCase();return !!x&&(!!x.regulated||isFirearmItem(x)||c.includes('ammunition')||c==='ammo')}
+function cartHasFirearm(){return cart.some(r=>isFirearmItem(cartInventoryItem(r)))}
+function cartHasPayPalIneligible(){return cart.some(r=>isPayPalIneligibleItem(cartInventoryItem(r)))}
+function syncCheckoutPaymentOptions(){const blocked=cartHasPayPalIneligible();const wrap=document.getElementById('paypalCheckoutWrap'),note=document.getElementById('paypalCheckoutNote');if(wrap)wrap.style.display=blocked?'none':'';if(note&&blocked)note.textContent='PayPal is unavailable for firearms and ammunition. Use secure card checkout through Fortis.Tech.';return blocked}
 let activeCategory='All';
 function render(cat=activeCategory){
   activeCategory=cat||'All';
@@ -388,7 +394,9 @@ function toggleShipping(){
 }
 function renderCheckoutSummary(){
   const ship=selectedShippingRate?.amount_cents||0;const tax=selectedShippingRate?.tax_cents??pickupTaxPreview?.tax_cents??0;const ready=document.getElementById('fulfillment')?.value==='pickup'?!!pickupTaxPreview:!!selectedShippingRate;
-  document.getElementById('checkoutSummary').innerHTML=cart.map(i=>`<div style="display:flex;justify-content:space-between;gap:12px"><span>${esc(i.title)} × ${i.qty}</span><b>${money(i.price_cents*i.qty)}</b></div>`).join('')+`<hr style="border:0;border-top:1px solid #333"><div style="display:flex;justify-content:space-between"><b>Subtotal</b><b>${money(subtotal())}</b></div>${selectedShippingRate?`<div style="display:flex;justify-content:space-between"><span>${esc(selectedShippingRate.provider)} ${esc(selectedShippingRate.service)}</span><b>${money(ship)}</b></div>`:''}${ready?`<div style="display:flex;justify-content:space-between"><span>Sales tax</span><b>${money(tax)}</b></div><div style="display:flex;justify-content:space-between;font-size:20px;margin-top:7px"><b>Order total*</b><b>${money(subtotal()+ship+tax)}</b></div>`:`<div class="smallNote">Enter your address and click GET SHIPPING RATES.</div>`}<div class="smallNote" id="checkoutPaymentModeNote">*Payment is completed securely through PayPal for eligible merchandise.</div>`;
+  const paymentNote=cartHasPayPalIneligible()?'*Card payment is processed securely through Fortis.Tech. PayPal is unavailable for firearms and ammunition.':'*Card payment is processed securely through Fortis.Tech. PayPal is also available for eligible non-regulated merchandise.';
+  document.getElementById('checkoutSummary').innerHTML=cart.map(i=>`<div style="display:flex;justify-content:space-between;gap:12px"><span>${esc(i.title)} × ${i.qty}</span><b>${money(i.price_cents*i.qty)}</b></div>`).join('')+`<hr style="border:0;border-top:1px solid #333"><div style="display:flex;justify-content:space-between"><b>Subtotal</b><b>${money(subtotal())}</b></div>${selectedShippingRate?`<div style="display:flex;justify-content:space-between"><span>${esc(selectedShippingRate.provider)} ${esc(selectedShippingRate.service)}</span><b>${money(ship)}</b></div>`:''}${ready?`<div style="display:flex;justify-content:space-between"><span>Sales tax</span><b>${money(tax)}</b></div><div style="display:flex;justify-content:space-between;font-size:20px;margin-top:7px"><b>Order total*</b><b>${money(subtotal()+ship+tax)}</b></div>`:`<div class="smallNote">Enter your address and click GET SHIPPING RATES.</div>`}<div class="smallNote" id="checkoutPaymentModeNote">${paymentNote}</div>`;
+  syncCheckoutPaymentOptions();
 }
 async function loadPickupTax(){try{pickupTaxPreview=null;renderCheckoutSummary();const r=await fetch(API+'/api/public/tax-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fulfillment:'pickup',shipping:null,shipping_cents:0,items:cart.map(i=>({inventory_id:i.id,quantity:i.qty}))})});const j=await r.json().catch(()=>({}));if(r.ok){pickupTaxPreview=j;renderCheckoutSummary()}}catch(e){console.warn(e)}}
 async function loadShippingRates(){
@@ -404,12 +412,22 @@ async function loadShippingRates(){
 function chooseShippingRate(i){selectedShippingRate=window._shipRates?.[i]||null;renderCheckoutSummary()}
 function openCheckout(){
   if(!cart.length)return;
+  const firearmRow=cart.find(r=>isFirearmItem(cartInventoryItem(r)));
+  if(firearmRow){
+    const firearm=cartInventoryItem(firearmRow);
+    if(firearm){
+      closeCart();
+      alert('Firearms use the dedicated pickup / FFL transfer checkout and cannot be processed in the standard cart.');
+      openFfl(firearm.id);
+      return;
+    }
+  }
   closeCart();
   selectedShippingRate=null;pickupTaxPreview=null;window._shipRates=[];renderCheckoutSummary();
   document.getElementById('checkoutMsg').className='full checkoutMsg';
   document.getElementById('checkoutModal').classList.add('open');
   document.body.style.overflow='hidden';
-  toggleShipping();loadFortisCheckout();loadPayPalCheckout()
+  toggleShipping();syncCheckoutPaymentOptions();loadFortisCheckout();if(!cartHasPayPalIneligible())loadPayPalCheckout()
 }
 function closeCheckout(){if(fortisCheckoutToken)cancelFortisCheckout();destroyFortisElements('merchandise');document.getElementById('fortisFrameWrap')?.classList.remove('show');const fb=document.getElementById('fortisPayBtn');if(fb){fb.style.display='';fb.disabled=false;fb.textContent='PAY SECURELY WITH CARD'}document.getElementById('checkoutModal').classList.remove('open');document.body.style.overflow=''}
 function checkoutPayload(){
@@ -470,6 +488,7 @@ async function startFortisCheckout(){
 
 let paypalLoading=null,paypalButtonsRendered=false,paypalConfig=null;
 async function loadPayPalCheckout(){
+  if(cartHasPayPalIneligible()){syncCheckoutPaymentOptions();return}
   if(paypalButtonsRendered)return;
   if(paypalLoading)return paypalLoading;
   paypalLoading=(async()=>{
