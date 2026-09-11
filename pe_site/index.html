@@ -448,11 +448,17 @@ async function cancelFortisToken(token){if(!token)return;try{await fetch(API+'/a
 async function cancelFortisCheckout(){const t=fortisCheckoutToken;fortisCheckoutToken=null;await cancelFortisToken(t)}
 function fortisTxId(event){const d=event?.data?.transaction||event?.data||event?.transaction||event||{};return String(d.id||d.transaction_id||d.transactionId||'').trim()}
 function buildFortisElements({clientToken,containerId,totalCents,orderNumber,email,state,postal,onDone,kind}){
-  destroyFortisElements(kind);const elements=new Commerce.elements(clientToken);if(kind==='firearm')fortisFirearmElements=elements;else fortisMerchElements=elements;
-  elements.on('ready',()=>{});elements.on('submitted',()=>{});elements.on('validationError',event=>{console.warn('Fortis validation',event)});elements.on('done',onDone);
-  const billing=[{name:'address',required:true},{name:'country',required:true,value:'US'},{name:'state',required:true,...(state?{value:state}:{})},{name:'city',required:true},{name:'postal_code',required:true,...(postal?{value:postal}:{})}];
-  const cfg={container:'#'+containerId,theme:'default',floatingLabels:true,showReceipt:false,amount:Number(totalCents),currencyCode:'USD',appearance:{colorButtonActionBackground:'#e86aa7',colorButtonActionText:'#16070f',colorFieldBorder:'#555555',borderRadius:'8px'},fields:{billing,additional:[{name:'email_address',required:true,...(email?{value:email}:{})},{name:'order_number',required:true,value:orderNumber,readOnly:true},{name:'transaction_api_id',hidden:true,value:orderNumber}]}};
-  if(fortisConfig?.mode==='live')cfg.environment='production';elements.create(cfg);return elements;
+  destroyFortisElements(kind);
+  const elements=new Commerce.elements(clientToken);
+  if(kind==='firearm')fortisFirearmElements=elements;else fortisMerchElements=elements;
+  // Follow Fortis.Tech Elements v1 documented flow: create from the server-issued client_token,
+  // render into the target container, use the built-in submit button, and consume the done event.
+  elements.on('ready',()=>{console.info('Fortis Elements ready')});
+  elements.on('submitted',event=>{console.info('Fortis Elements submitted',event?.type||'submitted')});
+  elements.on('validationError',event=>{console.warn('Fortis validation',event)});
+  elements.on('done',onDone);
+  elements.create({container:'#'+containerId,theme:'default',showSubmitButton:true});
+  return elements;
 }
 async function confirmFortisPayment({checkoutToken,transactionId,kind}){
   const customerToken=localStorage.getItem('pe_customer_token');const r=await fetch(API+'/api/public/fortis/confirm',{method:'POST',headers:{'Content-Type':'application/json',...(customerToken?{Authorization:'Bearer '+customerToken}:{})},body:JSON.stringify({checkout_token:checkoutToken,transaction_id:transactionId})}),j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Could not verify the Fortis payment.');return j;
