@@ -40,6 +40,7 @@ async function ensureSchema(){
   await pool.query(schema);
   // Repair older inventory rows that were categorized as regulated but accidentally saved with regulated=false.
   await pool.query(`UPDATE inventory SET regulated=true,updated_at=now() WHERE regulated=false AND lower(category) IN ('firearms','firearm','guns','gun','handguns','handgun','rifles','rifle','shotguns','shotgun','ammunition','ammo')`);
+  await pool.query(`ALTER TABLE state_law_profiles ADD COLUMN IF NOT EXISTS last_verified_by text`);
 }
 
 // ---------- CLOUDFLARE R2 IMAGE STORAGE ----------
@@ -1030,14 +1031,14 @@ async function ensureStateLawProfiles(){
   }
 }
 app.get('/api/state-law-profiles',auth,requireRole('viewer'),async(_req,res)=>{
-  try{await ensureStateLawProfiles();const {rows}=await pool.query('SELECT * FROM state_law_profiles ORDER BY state_name');res.json({official_atf_url:ATF_STATE_LAWS_URL,ffl_ezcheck_url:ATF_EZCHECK_URL,profiles:rows})}
+  try{await ensureStateLawProfiles();const {rows}=await pool.query(`SELECT s.*,u.email AS last_verified_by_email FROM state_law_profiles s LEFT JOIN users u ON u.id::text=s.last_verified_by ORDER BY s.state_name`);res.json({official_atf_url:ATF_STATE_LAWS_URL,ffl_ezcheck_url:ATF_EZCHECK_URL,profiles:rows})}
   catch(e){console.error(e);res.status(500).json({error:'Could not load state law references'})}
 });
 app.patch('/api/state-law-profiles/:state',auth,requireRole('manager'),async(req,res)=>{
   const code=String(req.params.state||'').toUpperCase();if(!STATE_NAMES[code])return res.status(404).json({error:'Unknown state'});
   const p=z.object({review_level:z.enum(['manual_review','restricted','blocked','store_policy_ok']).optional(),summary:z.string().max(6000).optional(),internal_notes:z.string().max(6000).optional(),source_url:z.string().url().max(1000).optional(),mark_verified:z.boolean().optional()}).safeParse(req.body);
   if(!p.success)return res.status(400).json({error:'Invalid state-law update'});await ensureStateLawProfiles();
-  const x=p.data;const {rows}=await pool.query(`UPDATE state_law_profiles SET review_level=COALESCE($1,review_level),summary=COALESCE($2,summary),internal_notes=COALESCE($3,internal_notes),source_url=COALESCE($4,source_url),last_verified_at=CASE WHEN $5 THEN now() ELSE last_verified_at END,updated_at=now(),updated_by=$6 WHERE state_code=$7 RETURNING *`,[x.review_level??null,x.summary??null,x.internal_notes??null,x.source_url??null,!!x.mark_verified,req.user.sub,code]);
+  const x=p.data;const {rows}=await pool.query(`UPDATE state_law_profiles SET review_level=COALESCE($1,review_level),summary=COALESCE($2,summary),internal_notes=COALESCE($3,internal_notes),source_url=COALESCE($4,source_url),last_verified_at=CASE WHEN $5 THEN now() ELSE last_verified_at END,last_verified_by=CASE WHEN $5 THEN $6::text ELSE last_verified_by END,updated_at=now(),updated_by=$6 WHERE state_code=$7 RETURNING *`,[x.review_level??null,x.summary??null,x.internal_notes??null,x.source_url??null,!!x.mark_verified,req.user.sub,code]);
   await audit(req,'UPDATE','state_law_profile',null,{state:code,fields:Object.keys(x)});res.json(rows[0]);
 });
 
@@ -1176,7 +1177,8 @@ app.post('/api/public/ffl-requests',checkoutLimit,async(req,res)=>{
     [requestNumber,inv.id,inv.title,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.request_type,dealer?.state||residence,dealer?.name||p.data.receiving_ffl_name||null,dealer?.phone||p.data.receiving_ffl_phone||null,dealer?.source_license_number||null,dealer?.license_type||null,p.data.notes,dealer?.id||null,dealer?JSON.stringify(dealer):null,JSON.stringify(address),p.data.shipping_method,quoted,p.data.age_certified,p.data.customer.date_of_birth,residence,p.data.request_type==='ffl_transfer'?!!dealer?.license_on_file:false]);
   res.status(201).json({...rows[0],dealer:dealer?{name:dealer.name,city:dealer.city,state:dealer.state,license_on_file:dealer.license_on_file,source_license_number:dealer.source_license_number,license_type:dealer.license_type}:null,quoted_total_cents:quoted,manual_compliance_review:true});
 });
-app.get('/api/ffl-requests',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query('SELECT * FROM ffl_requests ORDER BY created_at DESC LIMIT 1000');res.json(rows);});
+app.get('/api/ffl-requests',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query(`SELECT f.*,i.category AS inventory_category,i.sku AS inventory_sku FROM ffl_requests f LEFT JOIN inventory i ON i.id=f.inventory_id ORDER BY f.created_at DESC LIMIT 1000`);res.json(rows);});
+app.get('/api/ffl-requests/:id/audit',auth,requireRole('viewer'),async(req,res)=>{const {rows}=await pool.query(`SELECT a.id,a.action,a.metadata,a.created_at,u.email AS user_email FROM audit_log a LEFT JOIN users u ON u.id=a.user_id WHERE a.entity_type='ffl_request' AND a.entity_id=$1 ORDER BY a.created_at DESC LIMIT 100`,[req.params.id]);res.json(rows);});
 app.patch('/api/ffl-requests/:id',auth,requireRole('manager'),async(req,res)=>{
   const p=z.object({status:z.enum(['new','contacted','awaiting_ffl','ready','completed','declined','cancelled']).optional(),state_law_reviewed:z.boolean().optional(),age_reviewed:z.boolean().optional(),identity_reviewed:z.boolean().optional(),ffl_verified:z.boolean().optional(),release_approved:z.boolean().optional(),compliance_notes:z.string().max(6000).optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid firearm request update'});
   const current=(await pool.query('SELECT * FROM ffl_requests WHERE id=$1',[req.params.id])).rows[0];if(!current)return res.status(404).json({error:'Request not found'});const next={...current,...p.data};const needsFfl=next.request_type==='ffl_transfer';
