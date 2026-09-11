@@ -1038,8 +1038,39 @@ app.patch('/api/state-law-profiles/:state',auth,requireRole('manager'),async(req
   const code=String(req.params.state||'').toUpperCase();if(!STATE_NAMES[code])return res.status(404).json({error:'Unknown state'});
   const p=z.object({review_level:z.enum(['manual_review','restricted','blocked','store_policy_ok']).optional(),summary:z.string().max(6000).optional(),internal_notes:z.string().max(6000).optional(),source_url:z.string().url().max(1000).optional(),mark_verified:z.boolean().optional()}).safeParse(req.body);
   if(!p.success)return res.status(400).json({error:'Invalid state-law update'});await ensureStateLawProfiles();
-  const x=p.data;const {rows}=await pool.query(`UPDATE state_law_profiles SET review_level=COALESCE($1,review_level),summary=COALESCE($2,summary),internal_notes=COALESCE($3,internal_notes),source_url=COALESCE($4,source_url),last_verified_at=CASE WHEN $5 THEN now() ELSE last_verified_at END,last_verified_by=CASE WHEN $5 THEN $6::text ELSE last_verified_by END,updated_at=now(),updated_by=$6 WHERE state_code=$7 RETURNING *`,[x.review_level??null,x.summary??null,x.internal_notes??null,x.source_url??null,!!x.mark_verified,req.user.sub,code]);
-  await audit(req,'UPDATE','state_law_profile',null,{state:code,fields:Object.keys(x)});res.json(rows[0]);
+  try{
+    const x=p.data;
+    // Keep last_verified_by (legacy text column) and updated_by (UUID FK) as separate
+    // SQL parameters. Reusing one parameter as both text and uuid can trigger a
+    // PostgreSQL type error and caused the admin's "Internal server error" on save.
+    const userId=String(req.user.sub||'');
+    const {rows}=await pool.query(`UPDATE state_law_profiles SET
+      review_level=COALESCE($1,review_level),
+      summary=COALESCE($2,summary),
+      internal_notes=COALESCE($3,internal_notes),
+      source_url=COALESCE($4,source_url),
+      last_verified_at=CASE WHEN $5::boolean THEN now() ELSE last_verified_at END,
+      last_verified_by=CASE WHEN $5::boolean THEN $6::text ELSE last_verified_by END,
+      updated_at=now(),
+      updated_by=$7::uuid
+      WHERE state_code=$8
+      RETURNING *`,[
+        x.review_level??null,
+        x.summary??null,
+        x.internal_notes??null,
+        x.source_url??null,
+        !!x.mark_verified,
+        userId,
+        userId,
+        code
+      ]);
+    if(!rows[0])return res.status(404).json({error:'State profile not found'});
+    await audit(req,'UPDATE','state_law_profile',null,{state:code,fields:Object.keys(x),mark_verified:!!x.mark_verified});
+    res.json(rows[0]);
+  }catch(e){
+    console.error('state-law profile update failed',e);
+    res.status(500).json({error:'Could not save state law profile'});
+  }
 });
 
 
