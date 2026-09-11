@@ -35,7 +35,12 @@ if (!process.env.DATABASE_URL || !process.env.JWT_SECRET) throw new Error('DATAB
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-async function ensureSchema(){ const schema=await fs.readFile(path.join(__dirname,'schema.sql'),'utf8'); await pool.query(schema); }
+async function ensureSchema(){
+  const schema=await fs.readFile(path.join(__dirname,'schema.sql'),'utf8');
+  await pool.query(schema);
+  // Repair older inventory rows that were categorized as regulated but accidentally saved with regulated=false.
+  await pool.query(`UPDATE inventory SET regulated=true,updated_at=now() WHERE regulated=false AND lower(category) IN ('firearms','firearm','guns','gun','handguns','handgun','rifles','rifle','shotguns','shotgun','ammunition','ammo')`);
+}
 
 // ---------- CLOUDFLARE R2 IMAGE STORAGE ----------
 function r2Config(){
@@ -210,11 +215,22 @@ app.post('/api/auth/login', loginLimit, async (req,res)=>{
 });
 app.get('/api/me',auth,(req,res)=>res.json({user:req.user}));
 
+function regulatedCategory(category){
+  const c=String(category||'').trim().toLowerCase();
+  return ['firearms','firearm','guns','gun','handguns','handgun','rifles','rifle','shotguns','shotgun','ammunition','ammo'].includes(c);
+}
+function firearmCategory(category){
+  const c=String(category||'').trim().toLowerCase();
+  return ['firearms','firearm','guns','gun','handguns','handgun','rifles','rifle','shotguns','shotgun'].includes(c);
+}
+function inventoryIsRegulated(inv){return !!inv&&(!!inv.regulated||regulatedCategory(inv.category));}
+function inventoryIsFirearm(inv){return !!inv&&firearmCategory(inv.category);}
+
 app.get('/api/public/inventory',async (_req,res)=>{
   const started=Date.now();
   const {rows}=await pool.query(`SELECT id,title,category,quantity,price_cents,price_label,sale_price_cents,sku,item_type,condition,description,image_url,image_urls,regulated,featured,created_at,updated_at,low_stock FROM inventory WHERE public_visible=true AND quantity>0 ORDER BY updated_at DESC`);
   res.set('Cache-Control','public, max-age=15, s-maxage=30');
-  res.json(rows);
+  res.json(rows.map(r=>({...r,regulated:inventoryIsRegulated(r)})));
   const ms=Date.now()-started;if(ms>1000)console.warn(`Slow public inventory response: ${ms}ms, ${rows.length} items`);
 });
 app.get('/api/public/store-config',(_req,res)=>res.json({mobilepawn_url:process.env.MOBILEPAWN_URL||null,mobilepawn_enabled:!!process.env.MOBILEPAWN_URL}));
@@ -298,7 +314,7 @@ app.post('/api/public/shipping-rates',checkoutLimit,async(req,res)=>{
     for(const requested of p.data.items){
       const inv=(await pool.query('SELECT id,title,category,quantity,regulated,public_visible,shipping_profile,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];
       if(!inv||!inv.public_visible||inv.quantity<requested.quantity)return res.status(409).json({error:'An item in your cart is no longer available.'});
-      if(inv.regulated)return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});
+      if(inventoryIsRegulated(inv))return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});
       const parcel=estimatedParcelForInventory(inv);
       for(let n=0;n<requested.quantity;n++)parcels.push({length:String(parcel.length),width:String(parcel.width),height:String(parcel.height),distance_unit:'in',weight:String(parcel.weight),mass_unit:'lb',_estimated:parcel.estimated,_profile:parcel.profile});
     }
@@ -320,7 +336,7 @@ app.post('/api/public/shipping-rates',checkoutLimit,async(req,res)=>{
 app.post('/api/public/tax-preview',checkoutLimit,async(req,res)=>{
   const p=z.object({fulfillment:z.enum(['pickup','shipping']),shipping:z.object({state:z.string().trim().min(2).max(50)}).nullable().optional(),shipping_cents:z.number().int().min(0).default(0),items:z.array(z.object({inventory_id:z.string().uuid(),quantity:z.number().int().positive().max(99)})).min(1).max(25)}).safeParse(req.body);
   if(!p.success)return res.status(400).json({error:'Invalid tax preview request.'});
-  try{let subtotal=0;for(const requested of p.data.items){const inv=(await pool.query('SELECT title,quantity,price_cents,sale_price_cents,regulated,public_visible FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];if(!inv||!inv.public_visible||inv.quantity<requested.quantity)return res.status(409).json({error:'An item in your cart is no longer available.'});if(inv.regulated)return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});const unit=inv.sale_price_cents!=null?Number(inv.sale_price_cents):Number(inv.price_cents);if(!Number.isFinite(unit))return res.status(400).json({error:`${inv.title} requires store pricing.`});subtotal+=unit*requested.quantity}
+  try{let subtotal=0;for(const requested of p.data.items){const inv=(await pool.query('SELECT title,quantity,price_cents,sale_price_cents,regulated,public_visible FROM inventory WHERE id=$1',[requested.inventory_id])).rows[0];if(!inv||!inv.public_visible||inv.quantity<requested.quantity)return res.status(409).json({error:'An item in your cart is no longer available.'});if(inventoryIsRegulated(inv))return res.status(400).json({error:'Regulated items use the licensed-dealer checkout flow.'});const unit=inv.sale_price_cents!=null?Number(inv.sale_price_cents):Number(inv.price_cents);if(!Number.isFinite(unit))return res.status(400).json({error:`${inv.title} requires store pricing.`});subtotal+=unit*requested.quantity}
     const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents:p.data.shipping_cents,state:p.data.shipping?.state,fulfillment:p.data.fulfillment});res.json({subtotal_cents:subtotal,shipping_cents:p.data.shipping_cents,tax_cents:tax.tax_cents,total_cents:subtotal+p.data.shipping_cents+tax.tax_cents,tax_state:tax.state,tax_rate_bps:tax.rate_bps,taxable:tax.taxable});
   }catch(e){console.error(e);res.status(500).json({error:'Could not calculate tax preview.'})}
 });
@@ -484,7 +500,7 @@ async function syncPaypalRefundState(order){
 }
 
 function paypalBlockedItem(inv){
-  if(inv.regulated)return true;
+  if(inventoryIsRegulated(inv))return true;
   const c=String(inv.category||'').toLowerCase();
   return /(^|\b)(ammo|ammunition|firearm|firearms|gun|guns)(\b|$)/i.test(c);
 }
@@ -670,8 +686,8 @@ app.post('/api/public/fortis/firearm/start',checkoutLimit,async(req,res)=>{
   const c=await pool.connect();let session;
   try{
     await c.query('BEGIN');
-    const inv=(await c.query('SELECT id,title,regulated,quantity,public_visible,price_cents,sale_price_cents FROM inventory WHERE id=$1 FOR UPDATE',[p.data.inventory_id])).rows[0];
-    if(!inv||!inv.public_visible||inv.quantity<1)throw Object.assign(new Error('This item is no longer available.'),{status:404});if(!inv.regulated)throw Object.assign(new Error('This checkout is only for regulated items.'),{status:400});
+    const inv=(await c.query('SELECT id,title,category,regulated,quantity,public_visible,price_cents,sale_price_cents FROM inventory WHERE id=$1 FOR UPDATE',[p.data.inventory_id])).rows[0];
+    if(!inv||!inv.public_visible||inv.quantity<1)throw Object.assign(new Error('This item is no longer available.'),{status:404});if(!inventoryIsFirearm(inv))throw Object.assign(new Error('This checkout is only for firearm items.'),{status:400});
     let dealer=null;if(p.data.request_type==='ffl_transfer'){if(!p.data.dealer_id)throw Object.assign(new Error('Choose a receiving FFL dealer before continuing.'),{status:400});dealer=(await c.query('SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred,source,source_license_number,license_type FROM ffl_dealers WHERE id=$1 AND active=true',[p.data.dealer_id])).rows[0];if(!dealer)throw Object.assign(new Error('The selected FFL is unavailable. Please choose another dealer.'),{status:400});}
     const subtotal=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);if(subtotal==null)throw Object.assign(new Error('This firearm requires store pricing.'),{status:400});
     const destinationState=p.data.request_type==='store_pickup'?taxConfig().storeState:(dealer?.state||residence);const tax=calculateSalesTax({subtotalCents:subtotal,shippingCents:0,state:destinationState,fulfillment:p.data.request_type==='store_pickup'?'pickup':'shipping'});
@@ -811,7 +827,7 @@ app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
     for(const requested of p.data.items){
       const inv=(await c.query('SELECT id,title,quantity,price_cents,sale_price_cents,regulated,public_visible FROM inventory WHERE id=$1 FOR UPDATE',[requested.inventory_id])).rows[0];
       if(!inv||!inv.public_visible){const e=new Error('An item in your cart is no longer available.');e.status=409;throw e}
-      if(inv.regulated){const e=new Error('Regulated items use the licensed-dealer checkout flow.');e.status=400;throw e}
+      if(inventoryIsRegulated(inv)){const e=new Error('Regulated items use the licensed-dealer checkout flow.');e.status=400;throw e}
       const unit=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);
       if(unit==null){const e=new Error(`${inv.title} requires store pricing.`);e.status=400;throw e}
       if(inv.quantity<requested.quantity){const e=new Error(`Not enough ${inv.title} is available.`);e.status=409;throw e}
@@ -842,7 +858,7 @@ app.post('/api/public/orders',checkoutLimit,async(req,res)=>{
 const inventorySchema=z.object({title:z.string().min(1).max(180),category:z.string().min(1).max(80),quantity:z.number().int().min(0),cost_cents:z.number().int().min(0),price_cents:z.number().int().min(0).nullable().optional(),price_label:z.string().max(80).nullable().optional(),sku:z.string().max(80).nullable().optional(),item_type:z.enum(['quantity','individual']),low_stock:z.number().int().min(0),description:z.string().max(5000),image_url:z.string().max(5*1024*1024).refine(v=>/^https?:\/\//i.test(v)||/^data:image\/(jpeg|png|webp);base64,/i.test(v),'Image must be an http(s) URL or uploaded image').nullable().optional(),image_urls:z.array(z.string().max(5*1024*1024)).max(4).default([]),condition:z.string().min(1).max(80).default('Good'),sale_price_cents:z.number().int().min(0).nullable().optional(),featured:z.boolean().default(false),regulated:z.boolean().default(false),public_visible:z.boolean().default(true),shipping_profile:z.enum(['auto','small','medium','large','oversize','guitar','console']).default('auto'),shipping_weight_lb:z.number().positive().nullable().optional(),shipping_length_in:z.number().positive().nullable().optional(),shipping_width_in:z.number().positive().nullable().optional(),shipping_height_in:z.number().positive().nullable().optional()});
 app.get('/api/inventory',auth,requireRole('viewer'),async (_req,res)=>{const {rows}=await pool.query('SELECT * FROM inventory ORDER BY updated_at DESC');res.json(rows);});
 app.post('/api/inventory',auth,requireRole('manager'),async (req,res)=>{
-  const p=inventorySchema.safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const x=p.data;
+  const p=inventorySchema.safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const x={...p.data,regulated:(p.data.regulated||regulatedCategory(p.data.category))};
   const {rows}=await pool.query(`INSERT INTO inventory(title,category,quantity,cost_cents,price_cents,price_label,sku,item_type,low_stock,description,image_url,image_urls,condition,sale_price_cents,featured,regulated,public_visible,shipping_profile,shipping_weight_lb,shipping_length_in,shipping_width_in,shipping_height_in) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,[x.title,x.category,x.quantity,x.cost_cents,x.price_cents??null,x.price_label??null,x.sku||null,x.item_type,x.low_stock,x.description,x.image_url??(x.image_urls?.[0]||null),JSON.stringify(x.image_urls||[]),x.condition,x.sale_price_cents??null,x.featured,x.regulated,x.public_visible,x.shipping_profile||'auto',x.shipping_weight_lb??null,x.shipping_length_in??null,x.shipping_width_in??null,x.shipping_height_in??null]);
   await audit(req,'CREATE','inventory',rows[0].id,{title:x.title,regulated:x.regulated}); res.status(201).json(rows[0]);
 });
@@ -857,7 +873,7 @@ app.post('/api/inventory/:id/duplicate',auth,requireRole('manager'),async(req,re
   }catch(e){console.error(e);res.status(500).json({error:'Could not duplicate inventory item'})}
 });
 app.patch('/api/inventory/:id',auth,requireRole('manager'),async (req,res)=>{
-  const p=inventorySchema.partial().safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); const keys=Object.keys(p.data); if(!keys.length)return res.status(400).json({error:'No changes'});
+  const p=inventorySchema.partial().safeParse(req.body); if(!p.success)return res.status(400).json({error:p.error.issues}); if(p.data.category&&regulatedCategory(p.data.category))p.data.regulated=true; const keys=Object.keys(p.data); if(!keys.length)return res.status(400).json({error:'No changes'});
   const map={price_cents:'price_cents',price_label:'price_label',title:'title',category:'category',quantity:'quantity',cost_cents:'cost_cents',sku:'sku',item_type:'item_type',low_stock:'low_stock',description:'description',image_url:'image_url',image_urls:'image_urls',condition:'condition',sale_price_cents:'sale_price_cents',featured:'featured',regulated:'regulated',public_visible:'public_visible',shipping_profile:'shipping_profile',shipping_weight_lb:'shipping_weight_lb',shipping_length_in:'shipping_length_in',shipping_width_in:'shipping_width_in',shipping_height_in:'shipping_height_in'};
   const vals=[]; const sets=[]; keys.forEach((k,i)=>{sets.push(`${map[k]}=$${i+1}`); vals.push(k==='image_urls'?JSON.stringify(p.data[k]||[]):(p.data[k]??null))}); vals.push(req.params.id);
   const {rows}=await pool.query(`UPDATE inventory SET ${sets.join(',')},updated_at=now() WHERE id=$${vals.length} RETURNING *`,vals); if(!rows[0])return res.status(404).json({error:'Inventory item not found'});
@@ -1152,8 +1168,8 @@ app.post('/api/public/ffl-requests',checkoutLimit,async(req,res)=>{
   const dob=new Date(p.data.customer.date_of_birth+'T12:00:00Z');if(Number.isNaN(dob.getTime()))return res.status(400).json({error:'Enter a valid date of birth.'});
   const now=new Date();let age=now.getUTCFullYear()-dob.getUTCFullYear();const m=now.getUTCMonth()-dob.getUTCMonth();if(m<0||(m===0&&now.getUTCDate()<dob.getUTCDate()))age--;if(age<18)return res.status(400).json({error:'Online firearm requests cannot be submitted by a person under 18.'});
   const residence=String(p.data.customer.residence_state||'').toUpperCase();if(!STATE_NAMES[residence])return res.status(400).json({error:'Choose a valid state of residence.'});
-  const inv=(await pool.query('SELECT id,title,regulated,quantity,public_visible,price_cents,sale_price_cents FROM inventory WHERE id=$1',[p.data.inventory_id])).rows[0];
-  if(!inv||!inv.public_visible||inv.quantity<1)return res.status(404).json({error:'This item is no longer available.'});if(!inv.regulated)return res.status(400).json({error:'This checkout is only for regulated items.'});
+  const inv=(await pool.query('SELECT id,title,category,regulated,quantity,public_visible,price_cents,sale_price_cents FROM inventory WHERE id=$1',[p.data.inventory_id])).rows[0];
+  if(!inv||!inv.public_visible||inv.quantity<1)return res.status(404).json({error:'This item is no longer available.'});if(!inventoryIsFirearm(inv))return res.status(400).json({error:'This checkout is only for firearm items.'});
   let dealer=null;if(p.data.request_type==='ffl_transfer'){if(!p.data.dealer_id)return res.status(400).json({error:'Choose a receiving FFL dealer before continuing.'});dealer=(await pool.query('SELECT id,name,address1,city,state,postal,phone,license_on_file,preferred,source,source_license_number,license_type FROM ffl_dealers WHERE id=$1 AND active=true',[p.data.dealer_id])).rows[0];if(!dealer)return res.status(400).json({error:'The selected FFL is unavailable. Please choose another dealer.'});}
   const requestNumber='FFL-'+Date.now().toString(36).toUpperCase()+'-'+Math.random().toString(36).slice(2,6).toUpperCase();const address={address1:p.data.customer.address1||'',city:p.data.customer.city||'',state:p.data.customer.state||'',postal:p.data.customer.postal||''};const quoted=inv.sale_price_cents!=null?Number(inv.sale_price_cents):(inv.price_cents!=null?Number(inv.price_cents):null);
   const {rows}=await pool.query(`INSERT INTO ffl_requests(request_number,inventory_id,item_title,customer_name,customer_email,customer_phone,request_type,destination_state,receiving_ffl_name,receiving_ffl_phone,receiving_ffl_number,receiving_ffl_license_type,notes,dealer_id,dealer_snapshot,customer_address,shipping_method,quoted_total_cents,age_certified,buyer_date_of_birth,buyer_residence_state,ffl_verified,compliance_status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,'hold') RETURNING request_number,status,payment_status,compliance_status`,
@@ -1171,6 +1187,14 @@ app.patch('/api/ffl-requests/:id',auth,requireRole('manager'),async(req,res)=>{
 });
 
 
+
+app.post('/api/admin/repair-regulated-inventory',auth,requireRole('manager'),async(req,res)=>{
+  try{
+    const {rows}=await pool.query(`UPDATE inventory SET regulated=true,updated_at=now() WHERE regulated=false AND lower(category) IN ('firearms','firearm','guns','gun','handguns','handgun','rifles','rifle','shotguns','shotgun','ammunition','ammo') RETURNING id,title,category`);
+    await audit(req,'REPAIR','inventory',null,{regulated_rows:rows.length});
+    res.json({ok:true,updated:rows.length,items:rows});
+  }catch(e){console.error(e);res.status(500).json({error:'Could not repair regulated inventory flags'})}
+});
 
 // ---------- BATCH INVENTORY INTAKE ----------
 const batchCreateSchema=z.object({name:z.string().trim().min(1).max(120)});
