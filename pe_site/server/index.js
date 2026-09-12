@@ -48,6 +48,11 @@ async function ensureSchema(){
   await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_action_at timestamptz`);
   await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS refunded_cents integer NOT NULL DEFAULT 0`);
   await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS inventory_restocked boolean NOT NULL DEFAULT false`);
+  // Matching Fortis reversal bookkeeping for ordinary merchandise orders.
+  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_action_type text`);
+  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_action_reference text`);
+  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_action_reason text`);
+  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_action_at timestamptz`);
 }
 
 // ---------- CLOUDFLARE R2 IMAGE STORAGE ----------
@@ -212,6 +217,12 @@ function auth(req,res,next){
 const requireRole=min => (req,res,next)=> roles[req.user?.role] >= roles[min] ? next() : res.status(403).json({error:'Insufficient permissions'});
 
 app.get('/health', async (_req,res)=>{ try{await pool.query('SELECT 1'); res.json({ok:true});}catch{res.status(503).json({ok:false});} });
+app.get('/api/admin/production-readiness',auth,requireRole('viewer'),async(_req,res)=>{
+  const cfg=fortisTechConfig();let database=false;try{await pool.query('SELECT 1');database=true}catch{}
+  const checks={database,fortis_configured:cfg.configured,fortis_mode:cfg.sandbox?'sandbox':'live',fortis_live_reversals_enabled:fortisReversalAllowed(),r2_configured:!!r2Config(),smtp_configured:!!(process.env.SMTP_HOST&&process.env.SMTP_USER&&process.env.SMTP_PASS),paypal_configured:!!(process.env.PAYPAL_CLIENT_ID&&process.env.PAYPAL_CLIENT_SECRET),shippo_configured:!!process.env.SHIPPO_API_TOKEN,jwt_configured:!!process.env.JWT_SECRET,admin_bootstrap_configured:!!(process.env.ADMIN_EMAIL&&process.env.ADMIN_PASSWORD)};
+  const warnings=[];if(cfg.sandbox)warnings.push('Fortis is still in SANDBOX mode.');if(!checks.smtp_configured)warnings.push('SMTP email is not fully configured.');if(!checks.shippo_configured)warnings.push('Shippo is not configured; live shipping labels will be unavailable.');if(!checks.r2_configured)warnings.push('Cloudflare R2 is not fully configured.');if(!checks.database)warnings.push('Database health check failed.');
+  res.json({ok:database&&cfg.configured&&checks.jwt_configured,checks,warnings,generated_at:new Date().toISOString()});
+});
 app.post('/api/auth/login', loginLimit, async (req,res)=>{
   const body=z.object({email:z.string().email().max(254),password:z.string().min(8).max(200)}).safeParse(req.body);
   if(!body.success) return res.status(400).json({error:'Valid email and password are required'});
@@ -961,6 +972,41 @@ app.patch('/api/orders/:id',auth,requireRole('manager'),async(req,res)=>{
 });
 
 
+
+app.get('/api/orders/:id/fortis-status',auth,requireRole('viewer'),async(req,res)=>{
+  try{
+    const o=(await pool.query('SELECT * FROM orders WHERE id=$1',[req.params.id])).rows[0];
+    if(!o)return res.status(404).json({error:'Order not found'});
+    if(o.payment_provider!=='fortis_tech'||!o.payment_reference)return res.status(400).json({error:'This order does not have a Fortis.Tech payment.'});
+    const tx=await fortisTechGetTransaction(o.payment_reference);
+    res.json({mode:fortisTechConfig().sandbox?'sandbox':'live',live_reversals_enabled:fortisReversalAllowed(),transaction:fortisTransactionSummary(tx),order:{payment_status:o.payment_status,refunded_cents:Number(o.refunded_cents||0),inventory_restocked:!!o.inventory_restocked,payment_action_type:o.payment_action_type,payment_action_at:o.payment_action_at}});
+  }catch(e){console.error('ORDER FORTIS STATUS',e);res.status(e.status||500).json({error:e.message||'Could not load Fortis transaction status.'})}
+});
+app.post('/api/orders/:id/fortis-action',auth,requireRole('manager'),async(req,res)=>{
+  const parsed=z.object({action:z.enum(['void','refund']),amount_cents:z.number().int().positive().optional(),reason:z.string().trim().min(3).max(500),restock:z.boolean().default(false)}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:'Action, reason, and a valid refund amount are required.'});
+  if(!fortisReversalAllowed())return res.status(403).json({error:'Live Fortis void/refund actions are locked. Enable live reversals only after Fortis production approval/testing.'});
+  const c=await pool.connect();try{
+    await c.query('BEGIN');const o=(await c.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE',[req.params.id])).rows[0];if(!o)throw Object.assign(new Error('Order not found'),{status:404});
+    if(o.payment_provider!=='fortis_tech'||!o.payment_reference)throw Object.assign(new Error('This order was not paid through Fortis.Tech.'),{status:400});
+    if(['voided','refunded'].includes(String(o.payment_status)))throw Object.assign(new Error('This payment has already been fully reversed.'),{status:409});
+    const tx=await fortisTechGetTransaction(o.payment_reference);const summary=fortisTransactionSummary(tx);const total=Number(o.total_cents||summary.amount_cents||0);const already=Number(o.refunded_cents||0);let amount=total;let full=true;
+    if(parsed.data.action==='void'){
+      if(!summary.is_voidable)throw Object.assign(new Error('Fortis reports that this transaction is not currently voidable. If it has settled, use Refund instead.'),{status:409});
+      await fortisTechRequest('/v1/transactions/'+encodeURIComponent(o.payment_reference)+'/void',{method:'PUT'});
+    }else{
+      if(!summary.is_refundable)throw Object.assign(new Error('Fortis reports that this transaction is not currently refundable.'),{status:409});
+      const remaining=Math.max(0,total-already);amount=Number(parsed.data.amount_cents||remaining);if(amount<1||amount>remaining)throw Object.assign(new Error('Refund amount exceeds the remaining refundable amount.'),{status:400});full=amount===remaining;
+      await fortisTechRequest('/v1/transactions/'+encodeURIComponent(o.payment_reference)+'/refund',{method:'PATCH',body:{transaction_amount:amount}});
+    }
+    const newRefunded=parsed.data.action==='void'?total:already+amount;let restocked=!!o.inventory_restocked;
+    if(full&&parsed.data.restock&&!restocked){const items=(await c.query('SELECT inventory_id,quantity FROM order_items WHERE order_id=$1',[o.id])).rows;for(const i of items)if(i.inventory_id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[i.quantity,i.inventory_id]);restocked=true}
+    const paymentStatus=parsed.data.action==='void'?'voided':(full?'refunded':'partially_refunded');
+    const updated=(await c.query(`UPDATE orders SET payment_status=$1,payment_action_type=$2,payment_action_reference=$3,payment_action_reason=$4,payment_action_at=now(),refunded_cents=$5,inventory_restocked=$6,order_status=CASE WHEN $7 THEN 'cancelled' ELSE order_status END,cancelled_at=CASE WHEN $7 THEN COALESCE(cancelled_at,now()) ELSE cancelled_at END,updated_at=now() WHERE id=$8 RETURNING *`,[paymentStatus,parsed.data.action,String(o.payment_reference),parsed.data.reason,newRefunded,restocked,full,o.id])).rows[0];
+    await c.query('COMMIT');await audit(req,parsed.data.action==='void'?'FORTIS_VOID':'FORTIS_REFUND','order',o.id,{transaction_id:o.payment_reference,amount_cents:amount,full,reason:parsed.data.reason,restocked});
+    res.json({ok:true,action:parsed.data.action,amount_cents:amount,full,restocked,order:updated});
+  }catch(e){try{await c.query('ROLLBACK')}catch{};console.error('ORDER FORTIS REVERSAL',e);res.status(e.status||500).json({error:e.message||'Could not complete the Fortis payment action.'})}finally{c.release()}
+});
 
 app.post('/api/orders/:id/paypal-refund',auth,requireRole('manager'),async(req,res)=>{
   try{
