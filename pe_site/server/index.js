@@ -131,6 +131,9 @@ app.set('trust proxy', 1);
 app.use(express.static(path.join(__dirname,'..')));
 app.get('/', (_req,res)=>res.sendFile(path.join(__dirname,'..','index.html')));
 app.get('/admin', (_req,res)=>res.sendFile(path.join(__dirname,'..','admin.html')));
+app.get('/robots.txt',(_req,res)=>res.type('text/plain').send('User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nSitemap: https://pinkelephantgunandpawn.com/sitemap.xml\n'));
+app.get('/sitemap.xml',(_req,res)=>res.type('application/xml').send('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://pinkelephantgunandpawn.com/</loc><changefreq>daily</changefreq><priority>1.0</priority></url></urlset>'));
+
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
   origin: [
@@ -216,10 +219,10 @@ function auth(req,res,next){
 }
 const requireRole=min => (req,res,next)=> roles[req.user?.role] >= roles[min] ? next() : res.status(403).json({error:'Insufficient permissions'});
 
-app.get('/health', async (_req,res)=>{ try{await pool.query('SELECT 1'); res.json({ok:true});}catch{res.status(503).json({ok:false});} });
+app.get('/health', async (_req,res)=>{ try{await pool.query('SELECT 1'); res.json({ok:true,service:'pink-elephant-web',uptime_seconds:Math.round(process.uptime()),timestamp:new Date().toISOString()});}catch{res.status(503).json({ok:false,timestamp:new Date().toISOString()});} });
 app.get('/api/admin/production-readiness',auth,requireRole('viewer'),async(_req,res)=>{
   const cfg=fortisTechConfig();let database=false;try{await pool.query('SELECT 1');database=true}catch{}
-  const checks={database,fortis_configured:cfg.configured,fortis_mode:cfg.sandbox?'sandbox':'live',fortis_live_reversals_enabled:fortisReversalAllowed(),r2_configured:!!r2Config(),smtp_configured:!!(process.env.SMTP_HOST&&process.env.SMTP_USER&&process.env.SMTP_PASS),paypal_configured:!!(process.env.PAYPAL_CLIENT_ID&&process.env.PAYPAL_CLIENT_SECRET),shippo_configured:!!process.env.SHIPPO_API_TOKEN,jwt_configured:!!process.env.JWT_SECRET,admin_bootstrap_configured:!!(process.env.ADMIN_EMAIL&&process.env.ADMIN_PASSWORD)};
+  const checks={database,fortis_configured:cfg.configured,fortis_mode:cfg.sandbox?'sandbox':'live',fortis_sandbox_reversals_enabled:cfg.sandbox,fortis_live_reversals_enabled:(!cfg.sandbox&&String(process.env.ALLOW_LIVE_FORTIS_REVERSALS||'false').toLowerCase()==='true'),r2_configured:!!r2Config(),smtp_configured:!!(process.env.SMTP_HOST&&process.env.SMTP_USER&&process.env.SMTP_PASS),paypal_configured:!!(process.env.PAYPAL_CLIENT_ID&&process.env.PAYPAL_CLIENT_SECRET),shippo_configured:!!process.env.SHIPPO_API_TOKEN,jwt_configured:!!process.env.JWT_SECRET,admin_bootstrap_configured:!!(process.env.ADMIN_EMAIL&&process.env.ADMIN_PASSWORD)};
   const warnings=[];if(cfg.sandbox)warnings.push('Fortis is still in SANDBOX mode.');if(!checks.smtp_configured)warnings.push('SMTP email is not fully configured.');if(!checks.shippo_configured)warnings.push('Shippo is not configured; live shipping labels will be unavailable.');if(!checks.r2_configured)warnings.push('Cloudflare R2 is not fully configured.');if(!checks.database)warnings.push('Database health check failed.');
   res.json({ok:database&&cfg.configured&&checks.jwt_configured,checks,warnings,generated_at:new Date().toISOString()});
 });
