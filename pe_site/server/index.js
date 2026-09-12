@@ -41,6 +41,13 @@ async function ensureSchema(){
   // Repair older inventory rows that were categorized as regulated but accidentally saved with regulated=false.
   await pool.query(`UPDATE inventory SET regulated=true,updated_at=now() WHERE regulated=false AND lower(category) IN ('firearms','firearm','guns','gun','handguns','handgun','rifles','rifle','shotguns','shotgun','ammunition','ammo')`);
   await pool.query(`ALTER TABLE state_law_profiles ADD COLUMN IF NOT EXISTS last_verified_by text`);
+  // Fortis reversal / refund bookkeeping for firearm orders. Safe to run repeatedly.
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_action_type text`);
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_action_reference text`);
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_action_reason text`);
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_action_at timestamptz`);
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS refunded_cents integer NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS inventory_restocked boolean NOT NULL DEFAULT false`);
 }
 
 // ---------- CLOUDFLARE R2 IMAGE STORAGE ----------
@@ -393,6 +400,25 @@ async function createFortisIntention(amountCents){
 async function fortisTechGetTransaction(transactionId){
   const raw=await fortisTechRequest('/v1/transactions/'+encodeURIComponent(transactionId));
   return raw?.data||raw?.transaction||raw;
+}
+function fortisBool(v){return v===true||v===1||v==='1'||String(v).toLowerCase()==='true'}
+function fortisReversalAllowed(){
+  const cfg=fortisTechConfig();
+  return cfg.sandbox||String(process.env.ALLOW_LIVE_FORTIS_REVERSALS||'false').toLowerCase()==='true';
+}
+function fortisTransactionSummary(tx){
+  return {
+    id:String(tx?.id||tx?.transaction_id||''),
+    amount_cents:fortisAmountToCents(tx?.transaction_amount??tx?.transactionAmount??tx?.amount),
+    status_code:tx?.status_code??tx?.statusCode??null,
+    verbiage:String(tx?.verbiage||tx?.status?.title||tx?.status||''),
+    is_voidable:fortisBool(tx?.is_voidable),
+    is_refundable:fortisBool(tx?.is_refundable),
+    is_settled:fortisBool(tx?.is_settled),
+    void_date:tx?.void_date||null,
+    return_date:tx?.return_date||null,
+    last_four:tx?.last_four||null
+  };
 }
 function fortisAmountToCents(value){
   const n=Number(value);if(!Number.isFinite(n))return null;
@@ -1210,6 +1236,51 @@ app.post('/api/public/ffl-requests',checkoutLimit,async(req,res)=>{
 });
 app.get('/api/ffl-requests',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query(`SELECT f.*,i.category AS inventory_category,i.sku AS inventory_sku FROM ffl_requests f LEFT JOIN inventory i ON i.id=f.inventory_id ORDER BY f.created_at DESC LIMIT 1000`);res.json(rows);});
 app.get('/api/ffl-requests/:id/audit',auth,requireRole('viewer'),async(req,res)=>{const {rows}=await pool.query(`SELECT a.id,a.action,a.metadata,a.created_at,u.email AS user_email FROM audit_log a LEFT JOIN users u ON u.id=a.user_id WHERE a.entity_type='ffl_request' AND a.entity_id=$1 ORDER BY a.created_at DESC LIMIT 100`,[req.params.id]);res.json(rows);});
+
+app.get('/api/ffl-requests/:id/fortis-status',auth,requireRole('viewer'),async(req,res)=>{
+  try{
+    const f=(await pool.query('SELECT * FROM ffl_requests WHERE id=$1',[req.params.id])).rows[0];
+    if(!f)return res.status(404).json({error:'Request not found'});
+    if(f.payment_provider!=='fortis_tech'||!f.payment_reference)return res.status(400).json({error:'This firearm request does not have a Fortis.Tech payment.'});
+    const tx=await fortisTechGetTransaction(f.payment_reference);
+    res.json({mode:fortisTechConfig().sandbox?'sandbox':'live',live_reversals_enabled:fortisReversalAllowed(),transaction:fortisTransactionSummary(tx),request:{payment_status:f.payment_status,refunded_cents:Number(f.refunded_cents||0),inventory_restocked:!!f.inventory_restocked,payment_action_type:f.payment_action_type,payment_action_at:f.payment_action_at}});
+  }catch(e){console.error('FORTIS STATUS',e);res.status(e.status||500).json({error:e.message||'Could not load Fortis transaction status.'})}
+});
+
+app.post('/api/ffl-requests/:id/fortis-action',auth,requireRole('manager'),async(req,res)=>{
+  const parsed=z.object({action:z.enum(['void','refund']),amount_cents:z.number().int().positive().optional(),reason:z.string().trim().min(3).max(500),restock:z.boolean().default(false)}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:'Choose void/refund, provide a reason, and use a valid refund amount.'});
+  if(!fortisReversalAllowed())return res.status(403).json({error:'Live Fortis void/refund actions are locked. Set ALLOW_LIVE_FORTIS_REVERSALS=true only after production reversal testing and approval.'});
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const f=(await c.query('SELECT * FROM ffl_requests WHERE id=$1 FOR UPDATE',[req.params.id])).rows[0];
+    if(!f)throw Object.assign(new Error('Request not found'),{status:404});
+    if(f.payment_provider!=='fortis_tech'||!f.payment_reference)throw Object.assign(new Error('This firearm request was not paid through Fortis.Tech.'),{status:400});
+    const tx=await fortisTechGetTransaction(f.payment_reference);const summary=fortisTransactionSummary(tx);
+    const total=Number(f.quoted_total_cents||summary.amount_cents||0);const already=Number(f.refunded_cents||0);const remaining=Math.max(0,total-already);
+    let amount=total;
+    if(parsed.data.action==='void'){
+      if(!summary.is_voidable)throw Object.assign(new Error('Fortis reports that this transaction is not currently voidable. If it has settled, use Refund instead.'),{status:409});
+      await fortisTechRequest('/v1/transactions/'+encodeURIComponent(f.payment_reference)+'/void',{method:'PUT'});
+    }else{
+      if(!summary.is_refundable)throw Object.assign(new Error('Fortis reports that this transaction is not currently refundable.'),{status:409});
+      amount=Number(parsed.data.amount_cents||remaining);
+      if(!Number.isInteger(amount)||amount<1||amount>remaining)throw Object.assign(new Error(`Refund must be between 1 cent and the remaining refundable amount (${remaining} cents).`),{status:400});
+      await fortisTechRequest('/v1/transactions/'+encodeURIComponent(f.payment_reference)+'/refund',{method:'PATCH',body:{transaction_amount:amount}});
+    }
+    const newRefunded=parsed.data.action==='refund'?Math.min(total,already+amount):total;
+    const full=parsed.data.action==='void'||newRefunded>=total;
+    let restocked=!!f.inventory_restocked;
+    if(parsed.data.restock&&full&&!restocked&&f.inventory_id){await c.query('UPDATE inventory SET quantity=quantity+1,updated_at=now() WHERE id=$1',[f.inventory_id]);restocked=true}
+    const paymentStatus=parsed.data.action==='void'?'voided':(full?'refunded':'partially_refunded');
+    const actionRef=String(f.payment_reference);
+    const updated=(await c.query(`UPDATE ffl_requests SET payment_status=$1,payment_action_type=$2,payment_action_reference=$3,payment_action_reason=$4,payment_action_at=now(),refunded_cents=$5,inventory_restocked=$6,status=CASE WHEN $7 THEN 'cancelled' ELSE status END,release_approved=CASE WHEN $7 THEN false ELSE release_approved END,compliance_status=CASE WHEN $7 THEN 'hold' ELSE compliance_status END,updated_at=now() WHERE id=$8 RETURNING *`,[paymentStatus,parsed.data.action,actionRef,parsed.data.reason,newRefunded,restocked,full,f.id])).rows[0];
+    await c.query('COMMIT');
+    await audit(req,parsed.data.action==='void'?'FORTIS_VOID':'FORTIS_REFUND','ffl_request',f.id,{transaction_id:f.payment_reference,amount_cents:amount,full,reason:parsed.data.reason,restocked});
+    res.json({ok:true,action:parsed.data.action,amount_cents:amount,full,restocked,request:updated});
+  }catch(e){try{await c.query('ROLLBACK')}catch{};console.error('FORTIS REVERSAL',e);res.status(e.status||500).json({error:e.message||'Could not complete the Fortis payment action.'})}finally{c.release()}
+});
 app.patch('/api/ffl-requests/:id',auth,requireRole('manager'),async(req,res)=>{
   const p=z.object({status:z.enum(['new','contacted','awaiting_ffl','ready','completed','declined','cancelled']).optional(),state_law_reviewed:z.boolean().optional(),age_reviewed:z.boolean().optional(),identity_reviewed:z.boolean().optional(),ffl_verified:z.boolean().optional(),release_approved:z.boolean().optional(),compliance_notes:z.string().max(6000).optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid firearm request update'});
   const current=(await pool.query('SELECT * FROM ffl_requests WHERE id=$1',[req.params.id])).rows[0];if(!current)return res.status(404).json({error:'Request not found'});const next={...current,...p.data};const needsFfl=next.request_type==='ffl_transfer';
