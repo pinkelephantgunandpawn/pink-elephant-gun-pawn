@@ -412,10 +412,17 @@ async function createFortisIntention(amountCents){
   return {clientToken,raw};
 }
 async function fortisTechGetTransaction(transactionId){
-  const raw=await fortisTechRequest('/v1/transactions/'+encodeURIComponent(transactionId));
+  // Fortis Support (2026-09-15): transaction capability fields such as is_voidable are expansions, not returned by default.
+  const raw=await fortisTechRequest('/v1/transactions/'+encodeURIComponent(transactionId)+'?expand=is_voidable');
   return raw?.data||raw?.transaction||raw;
 }
 function fortisBool(v){return v===true||v===1||v==='1'||String(v).toLowerCase()==='true'}
+function fortisOptionalBool(v){
+  if(v===undefined||v===null||v==='')return null;
+  if(v===false||v===0||v==='0'||String(v).toLowerCase()==='false')return false;
+  if(v===true||v===1||v==='1'||String(v).toLowerCase()==='true')return true;
+  return null;
+}
 function fortisReversalAllowed(){
   const cfg=fortisTechConfig();
   return cfg.sandbox||String(process.env.ALLOW_LIVE_FORTIS_REVERSALS||'false').toLowerCase()==='true';
@@ -426,9 +433,10 @@ function fortisTransactionSummary(tx){
     amount_cents:fortisAmountToCents(tx?.transaction_amount??tx?.transactionAmount??tx?.amount),
     status_code:tx?.status_code??tx?.statusCode??null,
     verbiage:String(tx?.verbiage||tx?.status?.title||tx?.status||''),
-    is_voidable:fortisBool(tx?.is_voidable),
-    is_refundable:fortisBool(tx?.is_refundable),
-    is_settled:fortisBool(tx?.is_settled),
+    is_voidable:fortisOptionalBool(tx?.is_voidable),
+    // Do not turn an omitted Fortis expansion into false. Unknown remains null and actions stay locked.
+    is_refundable:fortisOptionalBool(tx?.is_refundable),
+    is_settled:fortisOptionalBool(tx?.is_settled),
     void_date:tx?.void_date||null,
     return_date:tx?.return_date||null,
     last_four:tx?.last_four||null
