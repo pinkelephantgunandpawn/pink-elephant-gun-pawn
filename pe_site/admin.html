@@ -5,6 +5,25 @@
 .orderCard{background:#0d0d10;border:1px solid var(--line);border-radius:12px;padding:14px;margin:10px 0}.orderTop{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.orderItems{margin:8px 0;padding-left:18px}.inlineSelect{width:auto;min-width:135px;padding:7px}.photoPreviews{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.photoPreviews img{width:100px;height:78px;object-fit:cover;border-radius:7px;border:1px solid var(--line)}
 .dealerCard{background:#0d0d10;border:1px solid var(--line);border-radius:12px;padding:14px;margin:10px 0}.dealerTop{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.badgeGood{color:#b8ffd0}.badgeOff{color:#aaa}
 .batchToolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0}.batchToolbar input{max-width:320px}.batchTableWrap{overflow:auto;border:1px solid var(--line);border-radius:12px}.batchTable{min-width:1120px}.batchTable td,.batchTable th{vertical-align:middle}.batchImg{width:72px;height:72px;object-fit:cover;border-radius:8px;background:#09090b}.batchInput{min-width:150px;padding:8px}.batchPrice{width:105px;min-width:105px}.batchSelect{min-width:125px;padding:8px}.confidence{font-weight:900}.confidence.high{color:var(--good)}.confidence.mid{color:var(--warn)}.confidence.low{color:var(--bad)}.batchProgress{height:10px;background:#24242b;border-radius:99px;overflow:hidden;margin-top:8px}.batchProgress>div{height:100%;background:var(--p);width:0}.batchHint{border:1px solid #4a3240;background:#170f14;border-radius:10px;padding:12px;margin:10px 0}.batchCheck{width:auto}.marketCell{min-width:145px}.batchStatus{white-space:nowrap}
+
+/* Final launch mobile polish */
+@media(max-width:700px){
+  .wrap{width:min(100% - 16px,1200px)}
+  .head{padding-top:18px}.head h1{font-size:28px;margin:4px 0}
+  .nav{gap:6px}.nav button,.btn{padding:10px 11px;font-size:12px}
+  .panel{padding:14px;margin:12px 0;overflow:hidden}
+  table{display:block;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .actions{gap:6px}.actions .btn,.actions a.btn{max-width:100%}
+  .orderCard,.qolOrderCard{overflow:hidden}
+  .orderTop{gap:8px;align-items:flex-start}.orderTop>div:last-child{white-space:nowrap}
+  .inlineSelect{min-width:0;max-width:100%}
+  .qolBadge{font-size:10px}
+}
+@media(max-width:480px){
+  .nav button{flex:1 1 calc(50% - 6px)}
+  .actions .btn,.actions a.btn{flex:1 1 145px;text-align:center}
+  .item{grid-template-columns:1fr}.item img{width:100%;height:150px}
+}
 </style>
 <style id="qolStyles">
 .qolGrid{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}.qolMetric{background:#101014;border:1px solid var(--line);border-radius:12px;padding:14px}.qolMetric b{display:block;font-size:22px;margin-top:5px}.qolToolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}.qolToolbar input,.qolToolbar select{width:auto;min-width:150px;flex:1}.qolToolbar .btn{flex:0 0 auto}.qolAlert{padding:11px 12px;border:1px solid #4a3240;border-radius:10px;background:#170f14;margin:7px 0}.qolAlert.good{border-color:#28543a;background:#102318}.qolAlert.warn{border-color:#604f22;background:#211b0d}.qolBadge{display:inline-block;padding:4px 7px;border-radius:99px;font-size:10px;font-weight:900;background:#2c2c33;margin-right:5px}.qolBadge.pink{background:var(--p);color:#16070f}.qolBadge.test{background:#6d2732;color:#ffd0d5}.qolBadge.good{background:#173722;color:#b8ffd0}.qolBadge.warn{background:#4a3d17;color:#ffe6a1}.qolItemCheck{width:auto;margin-right:7px}.qolAction{border-left:3px solid var(--p);padding-left:10px;margin:8px 0}.qolInventoryBar{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;margin:10px 0}.qolInventoryBar input,.qolInventoryBar select{min-width:0}.qolHidden{display:none!important}.qolOrderSteps{display:flex;gap:4px;flex-wrap:wrap;margin:8px 0}.qolStep{padding:4px 7px;border-radius:6px;background:#232329;color:#999;font-size:10px;font-weight:900}.qolStep.done{background:#173722;color:#b8ffd0}.qolStep.current{background:var(--p);color:#16070f}.qolOrderCard.testOrder{border-color:#6d2732}.qolOrderCard.actionOrder{box-shadow:0 0 0 1px #66531f inset}.shipPresetRow{display:grid;grid-template-columns:1fr auto;gap:8px}.bravoPlaceholder{border:1px dashed #555;border-radius:12px;padding:14px;background:#0b0b0e}.qolSmallBtn{padding:7px 9px!important;font-size:11px}.qolPrint{display:none}
