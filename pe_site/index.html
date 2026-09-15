@@ -195,7 +195,27 @@ body.peCategoryPage #inventory .head h2{
 @media(max-width:760px){.inventorySpotGrid{grid-template-columns:1fr}.inventorySpotlight{padding:55px 0!important}.inventorySpotlight .head h2{font-size:32px}.inventorySpotActions{flex-direction:column}.inventorySpotActions a{width:100%}}
 </style>
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"SportingGoodsStore","name":"Pink Elephant Gun & Pawn","url":"https://pinkelephantgunandpawn.com/","telephone":"+1-606-506-5030","address":{"@type":"PostalAddress","streetAddress":"30 Colonels Ct","addressLocality":"Prestonsburg","addressRegion":"KY","postalCode":"41653","addressCountry":"US"},"openingHoursSpecification":[{"@type":"OpeningHoursSpecification","dayOfWeek":["Monday","Tuesday","Wednesday","Thursday","Friday"],"opens":"10:00","closes":"18:00"},{"@type":"OpeningHoursSpecification","dayOfWeek":"Saturday","opens":"10:00","closes":"17:00"}],"sameAs":["https://www.facebook.com/p/Pink-Elephant-Unlimited-61558233065136/","https://www.ebay.com/usr/pinkelephantunlimited5030","https://reverb.com/shop/todds-gear-depot-483"]}</script>
-</head><body><a class="skipLink" href="#inventory">Skip to inventory</a>
+
+<style id="peAgeGateStyles">
+#peAgeGate{position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.94);display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(8px)}
+#peAgeGate.peAgeHidden{display:none}.peAgeCard{width:min(520px,100%);background:linear-gradient(145deg,#181219,#09090b);border:1px solid #5a3048;border-radius:22px;padding:34px 28px;text-align:center;box-shadow:0 24px 80px rgba(0,0,0,.7)}
+.peAge18{width:92px;height:92px;margin:0 auto 18px;border-radius:999px;display:flex;align-items:center;justify-content:center;background:#e86aa7;color:#16070f;font-size:34px;font-weight:1000;border:5px solid #ffb4d5}.peAgeBrand{color:#e86aa7;font-weight:1000;letter-spacing:1px;font-size:22px}.peAgeCard h2{font-size:30px;margin:10px 0}.peAgeCard p{color:#c9c9d0;line-height:1.55;margin:0 auto 22px;max-width:420px}.peAgeActions{display:grid;gap:10px}.peAgeEnter,.peAgeExit{width:100%;padding:14px 16px;border-radius:10px;font-weight:1000;cursor:pointer;font-size:14px}.peAgeEnter{background:#e86aa7;color:#16070f;border:2px solid #e86aa7}.peAgeExit{background:transparent;color:#fff;border:1px solid #555}.peAgeFine{font-size:11px!important;color:#85858e!important;margin-top:16px!important}
+</style>
+</head><body>
+<div id="peAgeGate" role="dialog" aria-modal="true" aria-labelledby="peAgeTitle">
+  <div class="peAgeCard">
+    <div class="peAge18">18+</div>
+    <div class="peAgeBrand">PINK ELEPHANT GUN &amp; PAWN</div>
+    <h2 id="peAgeTitle">You must be 18 or older to enter.</h2>
+    <p>This website contains firearms, ammunition, and other age-restricted merchandise. Please confirm your age to continue.</p>
+    <div class="peAgeActions">
+      <button class="peAgeEnter" id="peAgeEnter" type="button">ENTER — I AM 18+</button>
+      <button class="peAgeExit" id="peAgeExit" type="button">EXIT — I AM UNDER 18</button>
+    </div>
+    <p class="peAgeFine">Age confirmation does not replace purchase eligibility, identification, background-check, FFL-transfer, or other legal requirements.</p>
+  </div>
+</div>
+<a class="skipLink" href="#inventory">Skip to inventory</a>
 
 <div class="peTopBar">
   <div class="peTopInner">
@@ -613,4 +633,24 @@ returns:["Return & Refund Policy",`<p><strong>All sales are final.</strong> Pink
 firearms:["Firearm / FFL Transfer Policy",`<p>Firearm transactions are subject to federal, state, and local law and Pink Elephant Gun & Pawn's compliance review. Submitting an online firearm order or FFL request does <strong>not</strong> complete the legal transfer of a firearm.</p><h3>Compliance Hold</h3><p>Online firearm requests may remain on compliance hold while eligibility, destination, receiving-FFL information, and applicable requirements are reviewed. We may decline or cancel a transaction that cannot lawfully or appropriately be completed.</p><h3>Store Pickup</h3><p>For an in-store transfer, the purchaser must appear in person and provide the identification and information required for the transfer. No firearm is released until all required transfer procedures are completed and release is legally permitted.</p><h3>Shipment to Another FFL</h3><p>When a firearm is transferred through another dealer, shipment is made only to an appropriately licensed receiving FFL after required documentation and verification are completed. The receiving FFL conducts the final customer transfer and may charge its own transfer fee.</p><h3>Transfer Requirements</h3><p>Any required ATF Form 4473, background check, identification/residency review, waiting period, permit, age requirement, or other applicable requirement must be satisfied before release. Online payment or order confirmation does not override these requirements.</p><h3>State & Local Restrictions</h3><p>Customers must provide accurate residence and destination information. Product legality and transfer requirements vary by jurisdiction. We may require additional review or documentation or refuse a transaction when legal eligibility cannot be confirmed.</p><h3>Payment</h3><p>Payment options for firearms and ammunition may differ from ordinary merchandise. PayPal is not offered for firearm or ammunition transactions through this website.</p><h3>Final Transfer Decision</h3><p>No firearm is released solely because an online request, order, or payment was accepted. Final release remains subject to completion of all applicable legal and compliance requirements.</p>`]
 };const b=document.getElementById("policyBack"),c=document.getElementById("policyContent");function close(){b.classList.remove("open");document.body.style.overflow=""}document.querySelectorAll("[data-policy]").forEach(a=>a.onclick=e=>{e.preventDefault();let p=P[a.dataset.policy];c.innerHTML='<h2>'+p[0]+'</h2><div class="policyUpdated">Last updated: '+u+'</div>'+p[1];b.classList.add("open");document.body.style.overflow="hidden"});document.getElementById("policyClose").onclick=close;b.onclick=e=>{if(e.target===b)close()};document.addEventListener("keydown",e=>{if(e.key==="Escape")close()})})();
 </script>
-<div class="shareToast" id="shareToast">Link copied.</div></body></html>
+<div class="shareToast" id="shareToast">Link copied.</div>
+<script id="peAgeGateScript">
+(function(){
+  const KEY='pe_age_18_confirmed';
+  const gate=document.getElementById('peAgeGate');
+  if(!gate)return;
+  let confirmed=false;
+  try{confirmed=localStorage.getItem(KEY)==='yes'}catch(e){}
+  if(confirmed){gate.classList.add('peAgeHidden');return;}
+  document.body.style.overflow='hidden';
+  const enter=document.getElementById('peAgeEnter');
+  const exit=document.getElementById('peAgeExit');
+  enter.addEventListener('click',function(){
+    try{localStorage.setItem(KEY,'yes')}catch(e){}
+    gate.classList.add('peAgeHidden');
+    document.body.style.overflow='';
+  });
+  exit.addEventListener('click',function(){window.location.href='https://www.google.com/';});
+})();
+</script>
+</body></html>
