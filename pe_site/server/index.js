@@ -53,6 +53,12 @@ async function ensureSchema(){
   await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_action_reference text`);
   await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_action_reason text`);
   await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_action_at timestamptz`);
+
+  // Fortis reversals add payment states that older databases did not allow.
+  // Rebuild the orders payment-status constraint safely on every startup so
+  // voids/full refunds/partial refunds can be recorded after Fortis succeeds.
+  await pool.query(`ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_payment_status_check`);
+  await pool.query(`ALTER TABLE orders ADD CONSTRAINT orders_payment_status_check CHECK (payment_status IN ('pending','paid','refunded','cancelled','voided','partially_refunded'))`);
 }
 
 // ---------- CLOUDFLARE R2 IMAGE STORAGE ----------
@@ -970,7 +976,7 @@ app.get('/api/orders',auth,requireRole('viewer'),async(req,res)=>{
   res.json(rows);
 });
 app.patch('/api/orders/:id',auth,requireRole('manager'),async(req,res)=>{
-  const p=z.object({order_status:z.enum(['new','confirmed','ready','shipped','completed','cancelled']).optional(),payment_status:z.enum(['pending','paid','refunded','cancelled']).optional(),tracking_number:z.string().max(180).nullable().optional(),admin_notes:z.string().max(3000).optional(),paid_at:z.coerce.date().optional(),shipped_at:z.coerce.date().optional(),completed_at:z.coerce.date().optional(),cancelled_at:z.coerce.date().optional(),admin_hidden:z.boolean().optional(),refunded_cents:z.number().int().min(0).optional(),refunded_tax_cents:z.number().int().min(0).optional(),refunded_at:z.coerce.date().nullable().optional()}).safeParse(req.body);
+  const p=z.object({order_status:z.enum(['new','confirmed','ready','shipped','completed','cancelled']).optional(),payment_status:z.enum(['pending','paid','refunded','cancelled','voided','partially_refunded']).optional(),tracking_number:z.string().max(180).nullable().optional(),admin_notes:z.string().max(3000).optional(),paid_at:z.coerce.date().optional(),shipped_at:z.coerce.date().optional(),completed_at:z.coerce.date().optional(),cancelled_at:z.coerce.date().optional(),admin_hidden:z.boolean().optional(),refunded_cents:z.number().int().min(0).optional(),refunded_tax_cents:z.number().int().min(0).optional(),refunded_at:z.coerce.date().nullable().optional()}).safeParse(req.body);
   if(!p.success)return res.status(400).json({error:p.error.issues});const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});
   const c=await pool.connect();try{await c.query('BEGIN');const current=(await c.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE',[req.params.id])).rows[0];if(!current){await c.query('ROLLBACK');return res.status(404).json({error:'Order not found'})}
     if(p.data.order_status==='cancelled'&&!current.inventory_restocked){const {rows:items}=await c.query('SELECT inventory_id,quantity FROM order_items WHERE order_id=$1',[current.id]);for(const i of items)if(i.inventory_id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[i.quantity,i.inventory_id]);p.data.inventory_restocked=true}
