@@ -1012,9 +1012,12 @@ app.post('/api/orders/:id/fortis-action',auth,requireRole('manager'),async(req,r
       if(!summary.is_voidable)throw Object.assign(new Error('Fortis reports that this transaction is not currently voidable. If it has settled, use Refund instead.'),{status:409});
       await fortisTechRequest('/v1/transactions/'+encodeURIComponent(o.payment_reference)+'/void',{method:'PUT'});
     }else{
-      if(!summary.is_refundable)throw Object.assign(new Error('Fortis reports that this transaction is not currently refundable.'),{status:409});
+      if(summary.is_refundable===false)throw Object.assign(new Error('Fortis reports that this transaction is not currently refundable.'),{status:409});
       const remaining=Math.max(0,total-already);amount=Number(parsed.data.amount_cents||remaining);if(amount<1||amount>remaining)throw Object.assign(new Error('Refund amount exceeds the remaining refundable amount.'),{status:400});full=amount===remaining;
-      await fortisTechRequest('/v1/transactions/'+encodeURIComponent(o.payment_reference)+'/refund',{method:'PATCH',body:{transaction_amount:amount}});
+      // Fortis.Tech v1: CC Refund - Previous Transaction.
+      // Refund amount is sent in dollars while our application stores cents.
+      const refundBody={transaction_amount:Number((amount/100).toFixed(2)),previous_transaction_id:String(o.payment_reference)};
+      await fortisTechRequest('/v1/transactions/cc/refund/prev-trxn',{method:'POST',body:refundBody});
     }
     const newRefunded=parsed.data.action==='void'?total:already+amount;let restocked=!!o.inventory_restocked;
     if(full&&parsed.data.restock&&!restocked){const items=(await c.query('SELECT inventory_id,quantity FROM order_items WHERE order_id=$1',[o.id])).rows;for(const i of items)if(i.inventory_id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[i.quantity,i.inventory_id]);restocked=true}
@@ -1327,10 +1330,13 @@ app.post('/api/ffl-requests/:id/fortis-action',auth,requireRole('manager'),async
       if(!summary.is_voidable)throw Object.assign(new Error('Fortis reports that this transaction is not currently voidable. If it has settled, use Refund instead.'),{status:409});
       await fortisTechRequest('/v1/transactions/'+encodeURIComponent(f.payment_reference)+'/void',{method:'PUT'});
     }else{
-      if(!summary.is_refundable)throw Object.assign(new Error('Fortis reports that this transaction is not currently refundable.'),{status:409});
+      if(summary.is_refundable===false)throw Object.assign(new Error('Fortis reports that this transaction is not currently refundable.'),{status:409});
       amount=Number(parsed.data.amount_cents||remaining);
       if(!Number.isInteger(amount)||amount<1||amount>remaining)throw Object.assign(new Error(`Refund must be between 1 cent and the remaining refundable amount (${remaining} cents).`),{status:400});
-      await fortisTechRequest('/v1/transactions/'+encodeURIComponent(f.payment_reference)+'/refund',{method:'PATCH',body:{transaction_amount:amount}});
+      // Fortis.Tech v1: CC Refund - Previous Transaction.
+      // Refund amount is sent in dollars while our application stores cents.
+      const refundBody={transaction_amount:Number((amount/100).toFixed(2)),previous_transaction_id:String(f.payment_reference)};
+      await fortisTechRequest('/v1/transactions/cc/refund/prev-trxn',{method:'POST',body:refundBody});
     }
     const newRefunded=parsed.data.action==='refund'?Math.min(total,already+amount):total;
     const full=parsed.data.action==='void'||newRefunded>=total;
