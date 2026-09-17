@@ -1016,7 +1016,7 @@ app.post('/api/orders/:id/fortis-action',auth,requireRole('manager'),async(req,r
       const remaining=Math.max(0,total-already);amount=Number(parsed.data.amount_cents||remaining);if(amount<1||amount>remaining)throw Object.assign(new Error('Refund amount exceeds the remaining refundable amount.'),{status:400});full=amount===remaining;
       // Fortis.Tech v1: CC Refund - Previous Transaction.
       // Refund amount is sent in dollars while our application stores cents.
-      const refundBody={transaction_amount:Number((amount/100).toFixed(2)),previous_transaction_id:String(o.payment_reference)};
+      const refundBody={transaction_amount:amount,previous_transaction_id:String(o.payment_reference)};
       await fortisTechRequest('/v1/transactions/cc/refund/prev-trxn',{method:'POST',body:refundBody});
     }
     const newRefunded=parsed.data.action==='void'?total:already+amount;let restocked=!!o.inventory_restocked;
@@ -1335,7 +1335,7 @@ app.post('/api/ffl-requests/:id/fortis-action',auth,requireRole('manager'),async
       if(!Number.isInteger(amount)||amount<1||amount>remaining)throw Object.assign(new Error(`Refund must be between 1 cent and the remaining refundable amount (${remaining} cents).`),{status:400});
       // Fortis.Tech v1: CC Refund - Previous Transaction.
       // Refund amount is sent in dollars while our application stores cents.
-      const refundBody={transaction_amount:Number((amount/100).toFixed(2)),previous_transaction_id:String(f.payment_reference)};
+      const refundBody={transaction_amount:amount,previous_transaction_id:String(f.payment_reference)};
       await fortisTechRequest('/v1/transactions/cc/refund/prev-trxn',{method:'POST',body:refundBody});
     }
     const newRefunded=parsed.data.action==='refund'?Math.min(total,already+amount):total;
