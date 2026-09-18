@@ -433,6 +433,29 @@ function fortisReversalAllowed(){
   const cfg=fortisTechConfig();
   return cfg.sandbox||String(process.env.ALLOW_LIVE_FORTIS_REVERSALS||'false').toLowerCase()==='true';
 }
+// Fortis may return HTTP 200 for a transaction that the gateway itself declined.
+// For transaction actions, status_id/status_code 101 is the approved status.
+// Any other explicit Fortis status code is treated as non-approved and MUST NOT
+// update local payment/refund state.
+function fortisActionResult(raw){
+  const tx=raw?.data?.transaction||raw?.data||raw?.transaction||raw||{};
+  const statusRaw=tx?.status_id??tx?.statusId??tx?.status_code??tx?.statusCode??null;
+  const statusText=String(tx?.verbiage||tx?.status?.title||tx?.status||raw?.message||'').trim();
+  const statusCode=statusRaw==null||statusRaw===''?null:Number(statusRaw);
+  const hasNumericStatus=Number.isFinite(statusCode);
+  const approved=hasNumericStatus?statusCode===101:/\b(approved|success|successful)\b/i.test(statusText);
+  return {tx,status_code:hasNumericStatus?statusCode:statusRaw,status_text:statusText,approved};
+}
+
+function assertFortisActionApproved(raw,actionLabel='Transaction'){
+  const result=fortisActionResult(raw);
+  if(result.approved)return result;
+  const detail=[result.status_code!=null?`status ${result.status_code}`:'',result.status_text].filter(Boolean).join(' — ');
+  const e=new Error(`${actionLabel} declined by Fortis${detail?` (${detail})`:''}. No local order changes were made.`);
+  e.status=409;e.fortis=raw;e.fortis_status_code=result.status_code;e.fortis_status_text=result.status_text;
+  throw e;
+}
+
 function fortisTransactionSummary(tx){
   return {
     id:String(tx?.id||tx?.transaction_id||''),
@@ -1017,7 +1040,10 @@ app.post('/api/orders/:id/fortis-action',auth,requireRole('manager'),async(req,r
       // Fortis.Tech v1: CC Refund - Previous Transaction.
       // Refund amount is sent in dollars while our application stores cents.
       const refundBody={transaction_amount:amount,previous_transaction_id:String(o.payment_reference)};
-      await fortisTechRequest('/v1/transactions/cc/refund/prev-trxn',{method:'POST',body:refundBody});
+      const refundRaw=await fortisTechRequest('/v1/transactions/cc/refund/prev-trxn',{method:'POST',body:refundBody});
+      // Fortis can return HTTP 200 even when the gateway declines the refund.
+      // Only an approved Fortis transaction status may mutate our local order.
+      assertFortisActionApproved(refundRaw,'Refund');
     }
     const newRefunded=parsed.data.action==='void'?total:already+amount;let restocked=!!o.inventory_restocked;
     if(full&&parsed.data.restock&&!restocked){const items=(await c.query('SELECT inventory_id,quantity FROM order_items WHERE order_id=$1',[o.id])).rows;for(const i of items)if(i.inventory_id)await c.query('UPDATE inventory SET quantity=quantity+$1,updated_at=now() WHERE id=$2',[i.quantity,i.inventory_id]);restocked=true}
@@ -1336,7 +1362,10 @@ app.post('/api/ffl-requests/:id/fortis-action',auth,requireRole('manager'),async
       // Fortis.Tech v1: CC Refund - Previous Transaction.
       // Refund amount is sent in dollars while our application stores cents.
       const refundBody={transaction_amount:amount,previous_transaction_id:String(f.payment_reference)};
-      await fortisTechRequest('/v1/transactions/cc/refund/prev-trxn',{method:'POST',body:refundBody});
+      const refundRaw=await fortisTechRequest('/v1/transactions/cc/refund/prev-trxn',{method:'POST',body:refundBody});
+      // Fortis can return HTTP 200 even when the gateway declines the refund.
+      // Only an approved Fortis transaction status may mutate our local FFL request.
+      assertFortisActionApproved(refundRaw,'Refund');
     }
     const newRefunded=parsed.data.action==='refund'?Math.min(total,already+amount):total;
     const full=parsed.data.action==='void'||newRefunded>=total;
