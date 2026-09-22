@@ -525,7 +525,7 @@ function buildFortisElements({clientToken,containerId,totalCents,orderNumber,ema
   elements.on('submitted',event=>{console.info('Fortis Elements submitted',event?.type||'submitted')});
   elements.on('validationError',event=>{console.warn('Fortis validation',event)});
   elements.on('done',onDone);
-  elements.create({container:'#'+containerId,theme:'default',showSubmitButton:true});
+  elements.create({container:'#'+containerId,theme:'default',environment:'production',showSubmitButton:true});
   return elements;
 }
 async function confirmFortisPayment({checkoutToken,transactionId,kind}){
