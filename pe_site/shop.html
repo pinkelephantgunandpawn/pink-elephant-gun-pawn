@@ -136,7 +136,7 @@ document.addEventListener("DOMContentLoaded",()=>{
   document.querySelectorAll(".peCatCard").forEach(btn=>{
     btn.addEventListener("click",()=>{
       const wanted=btn.dataset.cat||"";
-      location.href="/?category="+encodeURIComponent(wanted)+"#inventory";
+      location.href="/shop.html?category="+encodeURIComponent(wanted);
     });
   });
 
@@ -692,13 +692,13 @@ firearms:["Firearm / FFL Transfer Policy",`<p>Firearm transactions are subject t
   const gate=document.getElementById('peAgeGate');
   if(!gate)return;
   let confirmed=false;
-  try{confirmed=localStorage.getItem(KEY)==='yes'}catch(e){}
+  try{confirmed=localStorage.getItem(KEY)==='yes'||document.cookie.split(';').some(v=>v.trim()==='pe_age_18_confirmed=yes')}catch(e){}
   if(confirmed){gate.classList.add('peAgeHidden');return;}
   document.body.style.overflow='hidden';
   const enter=document.getElementById('peAgeEnter');
   const exit=document.getElementById('peAgeExit');
   enter.addEventListener('click',function(){
-    try{localStorage.setItem(KEY,'yes')}catch(e){}
+    try{localStorage.setItem(KEY,'yes');document.cookie='pe_age_18_confirmed=yes; Max-Age=2592000; Path=/; SameSite=Lax'}catch(e){}
     gate.classList.add('peAgeHidden');
     document.body.style.overflow='';
   });
