@@ -225,7 +225,73 @@ body.peCategoryPage #inventory .head h2{
 body.peCategoryPage .peFeaturedHome{display:none!important}
 @media(max-width:1050px){.peFeaturedGrid{grid-template-columns:repeat(2,1fr)}}@media(max-width:780px){.peSignSep,.peSignLink{display:none}.peHeroSlider,.peHeroInner{min-height:430px}.peHeroArrow{width:36px;height:36px}.peHeroArrow.prev{left:8px}.peHeroArrow.next{right:8px}.peFeaturedHead{align-items:flex-start;flex-direction:column}}@media(max-width:560px){.peFeaturedGrid{grid-template-columns:1fr}}
 </style>
-<style id="accountPageMode">.peHeroSlider,.peTrustBar,.peFeaturedHome,#inventory,#services,#firearms,#contact,.cta,footer{display:none!important}.peAcctBack{display:flex!important;position:relative!important;inset:auto!important;background:#070708!important;min-height:calc(100vh - 130px);padding:54px 18px!important;z-index:1!important}.peAcctBox{width:min(980px,100%)!important;max-height:none!important;overflow:visible!important;padding:30px!important}.peClose{display:none!important}.peMainNav>a.active{color:#f0f0f2}</style></head><body>
+<style id="accountPageMode">.peHeroSlider,.peTrustBar,.peFeaturedHome,#inventory,#services,#firearms,#contact,.cta,footer{display:none!important}.peAcctBack{display:flex!important;position:relative!important;inset:auto!important;background:#070708!important;min-height:calc(100vh - 130px);padding:54px 18px!important;z-index:1!important}.peAcctBox{width:min(980px,100%)!important;max-height:none!important;overflow:visible!important;padding:30px!important}.peClose{display:none!important}.peMainNav>a.active{color:#f0f0f2}</style>
+<style id="peAccountPageFinalFix20260922">
+/* Account page only: never show storefront/home sections */
+.peHero,.peHeroSlider,.peHeroSlides,.peTrustBar,.peCategoryBand,.peFeaturedHome,
+.inventorySpotlight,.outdoorHub,#inventory,#services,#firearms,#contact,.cta,
+.layawayBand,#orderLookup,footer{
+  display:none!important;
+}
+
+/* Put authentication/account UI immediately below the header */
+.peAcctBack{
+  display:flex!important;
+  position:relative!important;
+  inset:auto!important;
+  width:100%!important;
+  min-height:calc(100vh - 130px)!important;
+  align-items:flex-start!important;
+  justify-content:center!important;
+  background:#070708!important;
+  padding:32px 18px 60px!important;
+  z-index:1!important;
+}
+.peAcctBox{
+  display:block!important;
+  width:min(980px,100%)!important;
+  max-height:none!important;
+  overflow:visible!important;
+  margin:0 auto!important;
+  padding:30px!important;
+}
+.peClose{display:none!important}
+html{scroll-behavior:auto!important}
+</style>
+<script id="peAccountDirectOpenFix20260922">
+document.addEventListener("DOMContentLoaded", function () {
+  function openRequestedAccountView() {
+    var p = new URLSearchParams(location.search);
+    var requested = (p.get("mode") || p.get("tab") || location.hash.replace("#","") || "").toLowerCase();
+
+    /* Use the page's existing account opener first so existing auth behavior is preserved. */
+    if (typeof window.openAccount === "function") {
+      try { window.openAccount(requested === "register" ? "register" : "login"); } catch(e) {}
+    }
+
+    var back = document.querySelector(".peAcctBack");
+    if (back) back.classList.add("open");
+
+    /* Support existing tab/buttons without assuming one exact implementation. */
+    var candidates = requested === "register"
+      ? ['[data-account-tab="register"]','[data-tab="register"]','#registerTab','#showRegister','.registerTab']
+      : ['[data-account-tab="login"]','[data-tab="login"]','#loginTab','#showLogin','.loginTab'];
+
+    for (var i=0;i<candidates.length;i++) {
+      var el=document.querySelector(candidates[i]);
+      if(el){ try{ el.click(); }catch(e){} break; }
+    }
+
+    /* Account UI belongs at the top of this page, regardless of old anchors. */
+    window.scrollTo(0,0);
+    setTimeout(function(){ window.scrollTo(0,0); }, 50);
+  }
+
+  openRequestedAccountView();
+});
+</script>
+
+</head><body>
 <div id="peAgeGate" role="dialog" aria-modal="true" aria-labelledby="peAgeTitle">
   <div class="peAgeCard">
     <div class="peAge18">18+</div>
