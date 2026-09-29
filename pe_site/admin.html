@@ -196,7 +196,8 @@ async function migrateImagesToR2(){
 async function refreshBatches(){try{batchList=await api('/api/batches');$('batchSelect').innerHTML='<option value="">Select saved batch</option>'+batchList.map(b=>`<option value="${b.id}" ${b.id===currentBatchId?'selected':''}>${esc(b.name)} — ${b.item_count} photos</option>`).join('')}catch(e){console.warn(e)}}
 async function createBatch(){const name=$('batchName').value.trim()||('Batch '+new Date().toLocaleString());try{const b=await api('/api/batches',{method:'POST',body:JSON.stringify({name})});currentBatchId=b.id;$('batchName').value='';await refreshBatches();await loadBatch(b.id)}catch(e){alert(e.message)}}
 async function loadBatch(id){currentBatchId=id||'';if(!id){batchItems=[];renderBatchRows();return}try{batchItems=await api('/api/batches/'+id+'/items');renderBatchRows();await refreshBatches()}catch(e){alert(e.message)}}
-function batchCats(){return ['Electronics','Gaming','Tools','Music','Jewelry','Collectibles','Accessories','Hunting','Fishing','Outdoors','Archery & Bows','Other','Firearms','Ammunition']}
+function allCategories(){return ['Firearms','Ammunition','Hunting','Fishing','Outdoors','Archery & Bows','Accessories','Scopes','Red Dots','Automotive','Cameras','Jewelry','Tools','Music','Electronics','Gaming','Collectibles','Other']}
+function batchCats(){return allCategories()}
 function renderBatchRows(){const box=$('batchRows');if(!batchItems.length){box.innerHTML='<tr><td colspan="10" class="muted">No photos in this batch yet.</td></tr>';return}box.innerHTML=batchItems.map(x=>{const conf=x.confidence==null?'—':Math.round(Number(x.confidence)*100)+'%';const cc=x.confidence==null?'':x.confidence>=.85?'high':x.confidence>=.6?'mid':'low';const market=x.suggested_price_cents!=null?`<b>${money(x.suggested_price_cents)}</b>${x.market_low_cents!=null&&x.market_high_cents!=null?`<div class="muted">${money(x.market_low_cents)}–${money(x.market_high_cents)}</div>`:''}<div class="muted">${esc(x.source_label||'')}</div>`:'<span class="muted">Not analyzed</span>';return `<tr data-id="${x.id}"><td><input class="batchCheck rowCheck" type="checkbox" ${x.status==='published'?'disabled':''}></td><td><img class="batchImg" src="${x.image_data}" alt=""></td><td><input class="batchInput rowTitle" value="${esc(x.title||x.suggested_title||'')}" placeholder="Item title"></td><td><input class="batchInput batchPrice rowPrice" type="number" min="0" step="0.01" value="${x.price_cents==null?'':(x.price_cents/100).toFixed(2)}"></td><td class="marketCell">${market}</td><td><input class="batchInput rowQty" type="number" min="1" step="1" value="${x.quantity||1}" style="width:75px;min-width:75px"></td><td><select class="batchSelect rowCondition">${['New','Like New','Very Good','Good','Fair','Poor / Parts'].map(v=>`<option ${v===(x.condition||'Good')?'selected':''}>${v}</option>`).join('')}</select></td><td><select class="batchSelect rowCategory">${batchCats().map(v=>`<option ${v===(x.category||'Other')?'selected':''}>${v}</option>`).join('')}</select></td><td><span class="confidence ${cc}">${conf}</span></td><td class="batchStatus"><span class="pill">${esc(x.status)}</span></td></tr>`}).join('')}
 function toggleBatchAll(v){document.querySelectorAll('#batchRows .rowCheck:not(:disabled)').forEach(c=>c.checked=v)}
 async function compressBatchImage(file){return new Promise((resolve,reject)=>{const img=new Image(),u=URL.createObjectURL(file);img.onload=()=>{try{const max=1200,scale=Math.min(1,max/Math.max(img.width,img.height)),c=document.createElement('canvas');c.width=Math.max(1,Math.round(img.width*scale));c.height=Math.max(1,Math.round(img.height*scale));c.getContext('2d').drawImage(img,0,0,c.width,c.height);URL.revokeObjectURL(u);resolve(c.toDataURL('image/webp',.72))}catch(e){reject(e)}};img.onerror=()=>{URL.revokeObjectURL(u);reject(Error('Could not read '+file.name))};img.src=u})}
@@ -234,13 +235,16 @@ async function quickPrice(id){
 }
 async function editCategory(id){
   const x=inv.find(i=>i.id===id);if(!x)return;
-  const categories=['Firearms','Ammunition','Hunting','Fishing','Outdoors','Archery & Bows','Accessories','Scopes','Red Dots','Automotive','Cameras','Jewelry','Tools','Music','Electronics','Gaming','Collectibles','Other'];
-  const val=prompt('Change category to:\n'+categories.join('\n'),x.category||'Other');
-  if(val===null)return;
-  const match=categories.find(c=>c.toLowerCase()===val.trim().toLowerCase());
-  if(!match)return alert('Please enter one of the listed categories exactly.');
-  const regulated=['Firearms','Ammunition'].includes(match);
-  try{await api('/api/inventory/'+id,{method:'PATCH',body:JSON.stringify({category:match,regulated})});await refresh()}catch(e){alert(e.message)}
+  const categories=allCategories();
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px';
+  const box=document.createElement('div');
+  box.style.cssText='width:min(430px,100%);background:#15151a;border:1px solid #444;border-radius:14px;padding:18px;box-shadow:0 20px 70px #000';
+  box.innerHTML='<h3 style=\"margin-top:0\">Change Category</h3><div class=\"muted\" style=\"margin-bottom:10px\">'+esc(x.title)+'</div><select id=\"categoryPicker\" style=\"width:100%\">'+categories.map(c=>`<option ${c===(x.category||'Other')?'selected':''}>${esc(c)}</option>`).join('')+'</select><div class=\"actions\" style=\"justify-content:flex-end;margin-top:14px\"><button class=\"btn\" id=\"categoryCancel\" type=\"button\">CANCEL</button><button class=\"btn primary\" id=\"categorySave\" type=\"button\">SAVE CATEGORY</button></div>';
+  overlay.appendChild(box);document.body.appendChild(overlay);
+  const close=()=>overlay.remove();
+  box.querySelector('#categoryCancel').onclick=close;overlay.onclick=e=>{if(e.target===overlay)close()};
+  box.querySelector('#categorySave').onclick=async()=>{const match=box.querySelector('#categoryPicker').value;const regulated=['Firearms','Ammunition'].includes(match);try{await api('/api/inventory/'+id,{method:'PATCH',body:JSON.stringify({category:match,regulated})});close();await refresh()}catch(e){alert(e.message)}};
 }
 async function duplicateItem(id){
   try{const copy=await api('/api/inventory/'+id+'/duplicate',{method:'POST',body:'{}'});await refresh();alert('Duplicate created as '+copy.title+' and hidden from the public site.')}catch(e){alert(e.message)}
