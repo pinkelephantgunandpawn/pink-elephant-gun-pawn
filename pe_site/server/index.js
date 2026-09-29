@@ -214,6 +214,28 @@ async function sendOrderEmail(orderId,type='confirmation'){
 }
 async function sendOrderConfirmation(orderId){return sendOrderEmail(orderId,'confirmation')}
 
+async function sendFflStatusEmail(fflRequest,type='ready'){
+  const tx=smtpTransport();if(!tx)return {sent:false,reason:'SMTP not configured'};
+  const f=typeof fflRequest==='object'&&fflRequest?.id?fflRequest:(await pool.query('SELECT * FROM ffl_requests WHERE id=$1',[fflRequest])).rows[0];
+  if(!f)return {sent:false,reason:'Firearm request not found'};
+  if(!f.customer_email)return {sent:false,reason:'Customer email missing'};
+  const from=process.env.ORDER_FROM_EMAIL||process.env.SMTP_USER;
+  const isPickup=f.request_type==='store_pickup';
+  const subject=type==='ready'?`Firearm order ready — ${f.request_number}`:`Firearm order update — ${f.request_number}`;
+  const intro=isPickup
+    ? 'Your firearm order has cleared our required store review and is ready for you to come to Pink Elephant Gun & Pawn for the remaining in-person transfer/pickup steps.'
+    : 'Your firearm order has cleared our required store review and is ready for the next dealer-transfer step. Do not travel to the receiving dealer until that dealer confirms the firearm is ready for you.';
+  const next=isPickup
+    ? '<p><strong>Next step:</strong> Please bring a valid government-issued photo ID and any other documents required for the transfer. The firearm is not released until all required in-person transfer requirements are completed.</p>'
+    : `<p><strong>Receiving FFL:</strong> ${String(f.receiving_ffl_name||'Your selected dealer')}</p><p>The receiving FFL completes the retail transfer to you after the firearm arrives and their required process is complete.</p>`;
+  const body=`<p>${intro}</p><p><strong>Request:</strong> ${f.request_number}<br><strong>Item:</strong> ${String(f.item_title||'Firearm')}</p>${next}<p>If you have questions before making the trip, call us at (606) 506-5030.</p>`;
+  const text=[intro,`Request: ${f.request_number}`,`Item: ${String(f.item_title||'Firearm')}`,isPickup?'Next step: Bring a valid government-issued photo ID and any other documents required for the transfer. The firearm is not released until all required in-person transfer requirements are completed.':`Receiving FFL: ${String(f.receiving_ffl_name||'Your selected dealer')}. Do not travel to the receiving dealer until they confirm the firearm is ready for you.`,`Questions: (606) 506-5030`].join('\n\n');
+  try{
+    await tx.sendMail({from,to:f.customer_email,subject:`Pink Elephant — ${subject}`,text,html:emailShell(subject,body)});
+    return {sent:true};
+  }catch(e){const detail=`SMTP ERROR code=${e?.code||'unknown'} command=${e?.command||'unknown'} host=${process.env.SMTP_HOST||'missing'} port=${process.env.SMTP_PORT||'587'} secure=${process.env.SMTP_SECURE||'false'} message=${e?.message||e}`;console.error('FFL EMAIL',detail);return {sent:false,reason:detail}}
+}
+
 
 
 const roles = { viewer: 1, manager: 2, admin: 3 };
@@ -1390,6 +1412,7 @@ app.patch('/api/ffl-requests/:id',auth,requireRole('manager'),async(req,res)=>{
   if(['ready','completed'].includes(p.data.status)&&!cleared)return res.status(409).json({error:'Compliance hold: complete state-law, age/ID, receiving-FFL verification (when shipped), and RELEASE APPROVED before marking this request ready/completed.'});
   const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});const vals=[],sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});sets.push(`compliance_status=$${vals.length+1}`,`compliance_reviewed_at=CASE WHEN $${vals.length+1}='cleared' THEN now() ELSE compliance_reviewed_at END`,`compliance_reviewed_by=CASE WHEN $${vals.length+1}='cleared' THEN $${vals.length+2} ELSE compliance_reviewed_by END`,`updated_at=now()`);vals.push(cleared?'cleared':'hold',req.user.sub,req.params.id);
   const {rows}=await pool.query(`UPDATE ffl_requests SET ${sets.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);await audit(req,'UPDATE','ffl_request',rows[0].id,{fields:keys,compliance_status:rows[0].compliance_status});res.json(rows[0]);
+  if(p.data.status==='ready'&&current.status!=='ready')sendFflStatusEmail(rows[0],'ready').then(r=>{if(!r.sent)console.error('FFL READY EMAIL NOT SENT',r.reason)}).catch(console.error);
 });
 
 
