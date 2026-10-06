@@ -1383,7 +1383,24 @@ app.post('/api/ffl-requests/:id/fedex-label',auth,requireRole('manager'),async(r
     res.json({ok:true,tracking_number:tracking,tracking_url:trackingUrl,shipping_cost_cents:cents,service_type:x.service_type,sandbox:c.sandbox,label_url:isUrl?label:null,label_available:!isUrl,request:rows[0]});
   }catch(e){console.error('FEDEX FFL LABEL',e);res.status(e.status||500).json({error:e.message||'Could not create FedEx label'})}
 });
-app.get('/api/ffl-requests/:id/fedex-label',auth,requireRole('viewer'),async(req,res)=>{const f=(await pool.query('SELECT fedex_label_data,fedex_label_mime,shipping_document_url FROM ffl_requests WHERE id=$1',[req.params.id])).rows[0];if(!f)return res.status(404).json({error:'Request not found'});if(f.shipping_document_url)return res.json({url:f.shipping_document_url});if(!f.fedex_label_data)return res.status(404).json({error:'No stored FedEx label for this request'});res.json({mime:f.fedex_label_mime||'application/pdf',base64:f.fedex_label_data})});
+app.get('/api/ffl-requests/:id/fedex-label',auth,requireRole('viewer'),async(req,res)=>{
+  const f=(await pool.query('SELECT request_number,shipping_tracking_number,fedex_label_data,fedex_label_mime,shipping_document_url FROM ffl_requests WHERE id=$1',[req.params.id])).rows[0];
+  if(!f)return res.status(404).json({error:'Request not found'});
+  if(f.shipping_document_url)return res.redirect(f.shipping_document_url);
+  if(!f.fedex_label_data)return res.status(404).json({error:'No stored FedEx label for this request'});
+  try{
+    const mime=f.fedex_label_mime||'application/pdf';
+    const ext=mime.toLowerCase().includes('pdf')?'pdf':'bin';
+    const safeRef=String(f.request_number||f.shipping_tracking_number||req.params.id).replace(/[^a-zA-Z0-9_-]/g,'_');
+    const filename=`FedEx-Label-${safeRef}.${ext}`;
+    const data=Buffer.from(String(f.fedex_label_data).replace(/^data:[^;]+;base64,/i,''),'base64');
+    res.set('Content-Type',mime);
+    res.set('Content-Disposition',`inline; filename="${filename}"`);
+    res.set('Content-Length',String(data.length));
+    res.set('Cache-Control','private, no-store');
+    return res.send(data);
+  }catch(e){console.error('FEDEX LABEL DOWNLOAD',e);return res.status(500).json({error:'Could not open stored FedEx label'})}
+});
 
 const fflRequestSchema=z.object({
   inventory_id:z.string().uuid(),
