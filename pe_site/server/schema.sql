@@ -304,6 +304,14 @@ ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_reviewed_at timesta
 ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS compliance_reviewed_by uuid REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS receiving_ffl_number text;
 ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS receiving_ffl_license_type text;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS approved_to_ship_ffl boolean NOT NULL DEFAULT false;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS shipping_carrier text;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS shipping_tracking_number text;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS shipping_cost_cents integer;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS shipping_tracking_url text;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS shipping_document_url text;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS firearm_shipped_at timestamptz;
+ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS firearm_delivered_at timestamptz;
 
 CREATE TABLE IF NOT EXISTS state_law_profiles (
   state_code text PRIMARY KEY,

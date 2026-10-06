@@ -1406,15 +1406,31 @@ app.post('/api/ffl-requests/:id/fortis-action',auth,requireRole('manager'),async
   }catch(e){try{await c.query('ROLLBACK')}catch{};console.error('FORTIS REVERSAL',e);res.status(e.status||500).json({error:e.message||'Could not complete the Fortis payment action.'})}finally{c.release()}
 });
 app.patch('/api/ffl-requests/:id',auth,requireRole('manager'),async(req,res)=>{
-  const p=z.object({status:z.enum(['new','contacted','awaiting_ffl','ready','completed','declined','cancelled']).optional(),state_law_reviewed:z.boolean().optional(),age_reviewed:z.boolean().optional(),identity_reviewed:z.boolean().optional(),ffl_verified:z.boolean().optional(),release_approved:z.boolean().optional(),compliance_notes:z.string().max(6000).optional()}).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid firearm request update'});
-  const current=(await pool.query('SELECT * FROM ffl_requests WHERE id=$1',[req.params.id])).rows[0];if(!current)return res.status(404).json({error:'Request not found'});const next={...current,...p.data};const needsFfl=next.request_type==='ffl_transfer';
-  const cleared=!!next.state_law_reviewed&&!!next.age_reviewed&&!!next.identity_reviewed&&(!needsFfl||!!next.ffl_verified)&&!!next.release_approved;
-  if(['ready','completed'].includes(p.data.status)&&!cleared)return res.status(409).json({error:'Compliance hold: complete state-law, age/ID, receiving-FFL verification (when shipped), and RELEASE APPROVED before marking this request ready/completed.'});
-  const keys=Object.keys(p.data);if(!keys.length)return res.status(400).json({error:'No changes'});const vals=[],sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(p.data[k]??null)});sets.push(`compliance_status=$${vals.length+1}`,`compliance_reviewed_at=CASE WHEN $${vals.length+1}='cleared' THEN now() ELSE compliance_reviewed_at END`,`compliance_reviewed_by=CASE WHEN $${vals.length+1}='cleared' THEN $${vals.length+2} ELSE compliance_reviewed_by END`,`updated_at=now()`);vals.push(cleared?'cleared':'hold',req.user.sub,req.params.id);
-  const {rows}=await pool.query(`UPDATE ffl_requests SET ${sets.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);await audit(req,'UPDATE','ffl_request',rows[0].id,{fields:keys,compliance_status:rows[0].compliance_status});res.json(rows[0]);
-  if(p.data.status==='ready'&&current.status!=='ready')sendFflStatusEmail(rows[0],'ready').then(r=>{if(!r.sent)console.error('FFL READY EMAIL NOT SENT',r.reason)}).catch(console.error);
+  const p=z.object({
+    status:z.enum(['new','contacted','awaiting_ffl','ready','completed','declined','cancelled']).optional(),
+    state_law_reviewed:z.boolean().optional(),age_reviewed:z.boolean().optional(),identity_reviewed:z.boolean().optional(),ffl_verified:z.boolean().optional(),
+    release_approved:z.boolean().optional(),approved_to_ship_ffl:z.boolean().optional(),compliance_notes:z.string().max(6000).optional(),
+    shipping_carrier:z.string().max(80).nullable().optional(),shipping_tracking_number:z.string().max(180).nullable().optional(),shipping_cost_cents:z.number().int().min(0).nullable().optional(),
+    shipping_tracking_url:z.string().url().max(1000).nullable().optional(),shipping_document_url:z.string().url().max(1000).nullable().optional(),
+    shipping_action:z.enum(['mark_shipped','mark_delivered']).optional()
+  }).safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid firearm request update'});
+  const current=(await pool.query('SELECT * FROM ffl_requests WHERE id=$1',[req.params.id])).rows[0];if(!current)return res.status(404).json({error:'Request not found'});
+  const data={...p.data};const shippingAction=data.shipping_action;delete data.shipping_action;
+  const next={...current,...data};const needsFfl=next.request_type==='ffl_transfer';
+  // Dealer transfers are cleared for shipment by APPROVED TO SHIP TO FFL. Store pickup continues to use RELEASE APPROVED.
+  const cleared=!!next.state_law_reviewed&&!!next.age_reviewed&&!!next.identity_reviewed&&(needsFfl?(!!next.ffl_verified&&!!next.approved_to_ship_ffl):!!next.release_approved);
+  if(shippingAction&& !needsFfl)return res.status(409).json({error:'FFL shipping actions only apply to dealer-transfer requests.'});
+  if(shippingAction==='mark_shipped'&&(!next.ffl_verified||!next.approved_to_ship_ffl))return res.status(409).json({error:'Verify the receiving FFL and check APPROVED TO SHIP TO FFL before marking the firearm shipped.'});
+  if(shippingAction==='mark_shipped'&&!String(next.shipping_carrier||'').trim())return res.status(409).json({error:'Select or enter a carrier before marking the firearm shipped.'});
+  if(shippingAction==='mark_delivered'&&!current.firearm_shipped_at)return res.status(409).json({error:'Mark the firearm shipped before marking it delivered to the FFL.'});
+  if(['ready','completed'].includes(data.status)&&!cleared)return res.status(409).json({error:needsFfl?'Compliance hold: complete state-law, age/ID, receiving-FFL verification, and APPROVED TO SHIP TO FFL before marking this request ready/completed.':'Compliance hold: complete state-law, age/ID, and RELEASE APPROVED before marking this request ready/completed.'});
+  const keys=Object.keys(data);if(!keys.length&&!shippingAction)return res.status(400).json({error:'No changes'});const vals=[],sets=[];keys.forEach((k,i)=>{sets.push(`${k}=$${i+1}`);vals.push(data[k]??null)});
+  if(shippingAction==='mark_shipped')sets.push('firearm_shipped_at=COALESCE(firearm_shipped_at,now())');
+  if(shippingAction==='mark_delivered')sets.push('firearm_delivered_at=COALESCE(firearm_delivered_at,now())');
+  sets.push(`compliance_status=$${vals.length+1}`,`compliance_reviewed_at=CASE WHEN $${vals.length+1}='cleared' THEN COALESCE(compliance_reviewed_at,now()) ELSE compliance_reviewed_at END`,`compliance_reviewed_by=CASE WHEN $${vals.length+1}='cleared' THEN $${vals.length+2} ELSE compliance_reviewed_by END`,`updated_at=now()`);vals.push(cleared?'cleared':'hold',req.user.sub,req.params.id);
+  const {rows}=await pool.query(`UPDATE ffl_requests SET ${sets.join(',')} WHERE id=$${vals.length} RETURNING *`,vals);await audit(req,shippingAction?shippingAction.toUpperCase():'UPDATE','ffl_request',rows[0].id,{fields:keys,shipping_action:shippingAction||null,compliance_status:rows[0].compliance_status});res.json(rows[0]);
+  if(data.status==='ready'&&current.status!=='ready')sendFflStatusEmail(rows[0],'ready').then(r=>{if(!r.sent)console.error('FFL READY EMAIL NOT SENT',r.reason)}).catch(console.error);
 });
-
 
 
 app.post('/api/admin/repair-regulated-inventory',auth,requireRole('manager'),async(req,res)=>{
