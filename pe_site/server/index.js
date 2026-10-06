@@ -52,6 +52,10 @@ async function ensureSchema(){
   await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS payment_action_at timestamptz`);
   await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS refunded_cents integer NOT NULL DEFAULT 0`);
   await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS inventory_restocked boolean NOT NULL DEFAULT false`);
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS fedex_label_data text`);
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS fedex_label_mime text`);
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS fedex_service_type text`);
+  await pool.query(`ALTER TABLE ffl_requests ADD COLUMN IF NOT EXISTS fedex_shipment_id text`);
   // Matching Fortis reversal bookkeeping for ordinary merchandise orders.
   await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_action_type text`);
   await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_action_reference text`);
@@ -1332,6 +1336,55 @@ app.patch('/api/ffl-dealers/:id',auth,requireRole('manager'),async(req,res)=>{
 });
 app.delete('/api/ffl-dealers/:id',auth,requireRole('manager'),async(req,res)=>{const {rows}=await pool.query('DELETE FROM ffl_dealers WHERE id=$1 RETURNING id,name',[req.params.id]);if(!rows[0])return res.status(404).json({error:'Dealer not found'});await audit(req,'DELETE','ffl_dealer',rows[0].id,{name:rows[0].name});res.status(204).end()});
 
+
+
+// ---------- FEDEX FFL SHIPPING ----------
+function fedexConfig(){
+  const key=(process.env.FEDEX_API_KEY||process.env.FEDEX_CLIENT_ID||'').trim();
+  const secret=(process.env.FEDEX_SECRET_KEY||process.env.FEDEX_CLIENT_SECRET||'').trim();
+  const account=(process.env.FEDEX_ACCOUNT_NUMBER||'').trim();
+  const sandbox=String(process.env.FEDEX_SANDBOX||'false').toLowerCase()==='true';
+  return {key,secret,account,sandbox,base:sandbox?'https://apis-sandbox.fedex.com':'https://apis.fedex.com'};
+}
+let fedexTokenCache={token:null,expires:0};
+async function fedexToken(){
+  const c=fedexConfig();
+  if(!c.key||!c.secret||!c.account){const e=new Error('FedEx is not fully configured. Add FEDEX_API_KEY, FEDEX_SECRET_KEY, and FEDEX_ACCOUNT_NUMBER in Render.');e.status=503;throw e}
+  if(fedexTokenCache.token&&Date.now()<fedexTokenCache.expires-60000)return fedexTokenCache.token;
+  const body=new URLSearchParams({grant_type:'client_credentials',client_id:c.key,client_secret:c.secret});
+  const r=await fetch(c.base+'/oauth/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
+  const j=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(j?.errors?.[0]?.message||j?.error_description||j?.message||'FedEx authorization failed');e.status=502;throw e}
+  fedexTokenCache={token:j.access_token,expires:Date.now()+Number(j.expires_in||3600)*1000};return j.access_token;
+}
+function fedexContact(name,phone,email){return {personName:String(name||'Shipping').slice(0,70),phoneNumber:String(phone||'6065065030').replace(/[^0-9]/g,'').slice(0,15)||'6065065030',...(email?{emailAddress:String(email).slice(0,80)}:{})}}
+function fedexAddress(street,city,state,postal){return {streetLines:[String(street||'')],city:String(city||''),stateOrProvinceCode:String(state||'').toUpperCase(),postalCode:String(postal||'').replace(/[^0-9-]/g,''),countryCode:'US'}}
+function fedexError(j){return j?.errors?.map(x=>x.message||x.code).filter(Boolean).join('; ')||j?.message||'FedEx shipment request failed'}
+app.get('/api/admin/fedex-status',auth,requireRole('manager'),async(_req,res)=>{const c=fedexConfig();res.json({configured:!!(c.key&&c.secret&&c.account),sandbox:c.sandbox,has_api_key:!!c.key,has_secret:!!c.secret,has_account:!!c.account})});
+app.post('/api/ffl-requests/:id/fedex-label',auth,requireRole('manager'),async(req,res)=>{
+  const parsed=z.object({service_type:z.enum(['FEDEX_GROUND','GROUND_HOME_DELIVERY','FEDEX_2_DAY','STANDARD_OVERNIGHT','PRIORITY_OVERNIGHT']).default('FEDEX_GROUND'),weight_lb:z.number().positive().max(150),length_in:z.number().positive().max(119),width_in:z.number().positive().max(119),height_in:z.number().positive().max(119)}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:'Enter valid package weight and dimensions.'});
+  try{
+    const f=(await pool.query(`SELECT f.*,i.shipping_weight_lb,i.shipping_length_in,i.shipping_width_in,i.shipping_height_in FROM ffl_requests f LEFT JOIN inventory i ON i.id=f.inventory_id WHERE f.id=$1`,[req.params.id])).rows[0];
+    if(!f)return res.status(404).json({error:'Request not found'});if(f.request_type!=='ffl_transfer')return res.status(409).json({error:'FedEx labels here are only for dealer-transfer requests.'});
+    if(!f.ffl_verified||!f.approved_to_ship_ffl)return res.status(409).json({error:'Verify the receiving FFL and check APPROVED TO SHIP TO FFL before creating a label.'});
+    const d=typeof f.dealer_snapshot==='string'?JSON.parse(f.dealer_snapshot||'{}'):(f.dealer_snapshot||{});
+    if(!d.address1||!d.city||!d.state||!d.postal)return res.status(409).json({error:'The receiving FFL record is missing a complete shipping address.'});
+    const c=fedexConfig(),token=await fedexToken(),x=parsed.data,from=shipFromAddress();
+    const payload={labelResponseOptions:'LABEL',accountNumber:{value:c.account},requestedShipment:{shipDatestamp:new Date().toISOString().slice(0,10),pickupType:'USE_SCHEDULED_PICKUP',serviceType:x.service_type,packagingType:'YOUR_PACKAGING',shipper:{contact:fedexContact(from.name,from.phone,from.email),address:fedexAddress(from.street1,from.city,from.state,from.zip)},recipients:[{contact:fedexContact(d.name||f.receiving_ffl_name,d.phone||f.receiving_ffl_phone,d.email),address:fedexAddress(d.address1,d.city,d.state,d.postal)}],shippingChargesPayment:{paymentType:'SENDER'},labelSpecification:{imageType:'PDF',labelStockType:'PAPER_85X11_TOP_HALF_LABEL'},requestedPackageLineItems:[{weight:{units:'LB',value:x.weight_lb},dimensions:{length:Math.ceil(x.length_in),width:Math.ceil(x.width_in),height:Math.ceil(x.height_in),units:'IN'}}]}};
+    const fr=await fetch(c.base+'/ship/v1/shipments',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json','X-locale':'en_US'},body:JSON.stringify(payload)});const j=await fr.json().catch(()=>({}));
+    if(!fr.ok){const e=new Error(fedexError(j));e.status=502;throw e}
+    const ts=j?.output?.transactionShipments?.[0]||{};const piece=ts?.pieceResponses?.[0]||{};const doc=piece?.packageDocuments?.[0]||ts?.shipmentDocuments?.[0]||{};const label=doc?.encodedLabel||doc?.url||null;const tracking=piece?.trackingNumber||ts?.masterTrackingNumber||null;
+    if(!tracking||!label)throw Object.assign(new Error('FedEx created the shipment but the tracking number or label was not returned.'),{status:502});
+    const isUrl=/^https?:\/\//i.test(label);const mime=String(doc?.contentType||'application/pdf').toLowerCase().includes('pdf')?'application/pdf':'application/octet-stream';
+    const rate=ts?.shipmentRating?.shipmentRateDetails?.[0];const amount=Number(rate?.totalNetCharge||rate?.totalNetFedExCharge||0);const cents=Number.isFinite(amount)&&amount>0?Math.round(amount*100):null;
+    const trackingUrl='https://www.fedex.com/fedextrack/?trknbr='+encodeURIComponent(tracking);
+    const {rows}=await pool.query(`UPDATE ffl_requests SET shipping_carrier='FedEx',shipping_tracking_number=$1,shipping_tracking_url=$2,shipping_cost_cents=COALESCE($3,shipping_cost_cents),shipping_document_url=$4,fedex_label_data=$5,fedex_label_mime=$6,fedex_service_type=$7,fedex_shipment_id=$8,updated_at=now() WHERE id=$9 RETURNING *`,[tracking,trackingUrl,cents,isUrl?label:null,isUrl?null:label,mime,x.service_type,ts?.masterTrackingNumber||tracking,f.id]);
+    await audit(req,'CREATE','fedex_ffl_label',f.id,{tracking_number:tracking,service_type:x.service_type,sandbox:c.sandbox,shipping_cost_cents:cents});
+    res.json({ok:true,tracking_number:tracking,tracking_url:trackingUrl,shipping_cost_cents:cents,service_type:x.service_type,sandbox:c.sandbox,label_url:isUrl?label:null,label_available:!isUrl,request:rows[0]});
+  }catch(e){console.error('FEDEX FFL LABEL',e);res.status(e.status||500).json({error:e.message||'Could not create FedEx label'})}
+});
+app.get('/api/ffl-requests/:id/fedex-label',auth,requireRole('viewer'),async(req,res)=>{const f=(await pool.query('SELECT fedex_label_data,fedex_label_mime,shipping_document_url FROM ffl_requests WHERE id=$1',[req.params.id])).rows[0];if(!f)return res.status(404).json({error:'Request not found'});if(f.shipping_document_url)return res.json({url:f.shipping_document_url});if(!f.fedex_label_data)return res.status(404).json({error:'No stored FedEx label for this request'});res.json({mime:f.fedex_label_mime||'application/pdf',base64:f.fedex_label_data})});
+
 const fflRequestSchema=z.object({
   inventory_id:z.string().uuid(),
   customer:z.object({name:z.string().trim().min(2).max(120),email:z.string().trim().email().max(180),phone:z.string().trim().min(7).max(40),address1:z.string().trim().max(180).optional(),city:z.string().trim().max(100).optional(),state:z.string().trim().min(2).max(50),postal:z.string().trim().max(20).optional(),date_of_birth:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),residence_state:z.string().trim().min(2).max(2)}),
@@ -1352,7 +1405,7 @@ app.post('/api/public/ffl-requests',checkoutLimit,async(req,res)=>{
     [requestNumber,inv.id,inv.title,p.data.customer.name,p.data.customer.email.toLowerCase(),p.data.customer.phone,p.data.request_type,dealer?.state||residence,dealer?.name||p.data.receiving_ffl_name||null,dealer?.phone||p.data.receiving_ffl_phone||null,dealer?.source_license_number||null,dealer?.license_type||null,p.data.notes,dealer?.id||null,dealer?JSON.stringify(dealer):null,JSON.stringify(address),p.data.shipping_method,quoted,p.data.age_certified,p.data.customer.date_of_birth,residence,p.data.request_type==='ffl_transfer'?!!dealer?.license_on_file:false]);
   res.status(201).json({...rows[0],dealer:dealer?{name:dealer.name,city:dealer.city,state:dealer.state,license_on_file:dealer.license_on_file,source_license_number:dealer.source_license_number,license_type:dealer.license_type}:null,quoted_total_cents:quoted,manual_compliance_review:true});
 });
-app.get('/api/ffl-requests',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query(`SELECT f.*,i.category AS inventory_category,i.sku AS inventory_sku FROM ffl_requests f LEFT JOIN inventory i ON i.id=f.inventory_id ORDER BY f.created_at DESC LIMIT 1000`);res.json(rows);});
+app.get('/api/ffl-requests',auth,requireRole('viewer'),async(_req,res)=>{const {rows}=await pool.query(`SELECT f.*,i.category AS inventory_category,i.sku AS inventory_sku,i.shipping_weight_lb,i.shipping_length_in,i.shipping_width_in,i.shipping_height_in FROM ffl_requests f LEFT JOIN inventory i ON i.id=f.inventory_id ORDER BY f.created_at DESC LIMIT 1000`);res.json(rows);});
 app.get('/api/ffl-requests/:id/audit',auth,requireRole('viewer'),async(req,res)=>{const {rows}=await pool.query(`SELECT a.id,a.action,a.metadata,a.created_at,u.email AS user_email FROM audit_log a LEFT JOIN users u ON u.id=a.user_id WHERE a.entity_type='ffl_request' AND a.entity_id=$1 ORDER BY a.created_at DESC LIMIT 100`,[req.params.id]);res.json(rows);});
 
 app.get('/api/ffl-requests/:id/fortis-status',auth,requireRole('viewer'),async(req,res)=>{
