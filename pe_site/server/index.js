@@ -1380,7 +1380,7 @@ app.post('/api/ffl-requests/:id/fedex-label',auth,requireRole('manager'),async(r
     const trackingUrl='https://www.fedex.com/fedextrack/?trknbr='+encodeURIComponent(tracking);
     const {rows}=await pool.query(`UPDATE ffl_requests SET shipping_carrier='FedEx',shipping_tracking_number=$1,shipping_tracking_url=$2,shipping_cost_cents=COALESCE($3,shipping_cost_cents),shipping_document_url=$4,fedex_label_data=$5,fedex_label_mime=$6,fedex_service_type=$7,fedex_shipment_id=$8,updated_at=now() WHERE id=$9 RETURNING *`,[tracking,trackingUrl,cents,isUrl?label:null,isUrl?null:label,mime,x.service_type,ts?.masterTrackingNumber||tracking,f.id]);
     await audit(req,'CREATE','fedex_ffl_label',f.id,{tracking_number:tracking,service_type:x.service_type,sandbox:c.sandbox,shipping_cost_cents:cents});
-    res.json({ok:true,tracking_number:tracking,tracking_url:trackingUrl,shipping_cost_cents:cents,service_type:x.service_type,sandbox:c.sandbox,label_url:isUrl?label:null,label_available:!isUrl,request:rows[0]});
+    res.json({ok:true,tracking_number:tracking,tracking_url:trackingUrl,shipping_cost_cents:cents,service_type:x.service_type,sandbox:c.sandbox,label_url:isUrl?label:null,label_data:isUrl?null:label,label_mime:mime,label_available:!isUrl,request:rows[0]});
   }catch(e){console.error('FEDEX FFL LABEL',e);res.status(e.status||500).json({error:e.message||'Could not create FedEx label'})}
 });
 app.get('/api/ffl-requests/:id/fedex-label',auth,requireRole('viewer'),async(req,res)=>{
