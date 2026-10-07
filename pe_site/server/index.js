@@ -1370,12 +1370,12 @@ app.post('/api/ffl-requests/:id/fedex-label',auth,requireRole('manager'),async(r
     const d=typeof f.dealer_snapshot==='string'?JSON.parse(f.dealer_snapshot||'{}'):(f.dealer_snapshot||{});
     if(!d.address1||!d.city||!d.state||!d.postal)return res.status(409).json({error:'The receiving FFL record is missing a complete shipping address.'});
     const c=fedexConfig(),token=await fedexToken(),x=parsed.data,from=shipFromAddress();
-    const payload={labelResponseOptions:'LABEL',accountNumber:{value:c.account},requestedShipment:{shipDatestamp:new Date().toISOString().slice(0,10),pickupType:'USE_SCHEDULED_PICKUP',serviceType:x.service_type,packagingType:'YOUR_PACKAGING',shipper:{contact:fedexContact(from.name,from.phone,from.email),address:fedexAddress(from.street1,from.city,from.state,from.zip)},recipients:[{contact:fedexContact(d.name||f.receiving_ffl_name,d.phone||f.receiving_ffl_phone,d.email),address:fedexAddress(d.address1,d.city,d.state,d.postal)}],shippingChargesPayment:{paymentType:'SENDER'},labelSpecification:{labelFormatType:'COMMON2D',imageType:'EPL2',labelStockType:'STOCK_4X6'},requestedPackageLineItems:[{weight:{units:'LB',value:x.weight_lb},dimensions:{length:Math.ceil(x.length_in),width:Math.ceil(x.width_in),height:Math.ceil(x.height_in),units:'IN'}}]}};
+    const payload={labelResponseOptions:'LABEL',accountNumber:{value:c.account},requestedShipment:{shipDatestamp:new Date().toISOString().slice(0,10),pickupType:'USE_SCHEDULED_PICKUP',serviceType:x.service_type,packagingType:'YOUR_PACKAGING',shipper:{contact:fedexContact(from.name,from.phone,from.email),address:fedexAddress(from.street1,from.city,from.state,from.zip)},recipients:[{contact:fedexContact(d.name||f.receiving_ffl_name,d.phone||f.receiving_ffl_phone,d.email),address:fedexAddress(d.address1,d.city,d.state,d.postal)}],shippingChargesPayment:{paymentType:'SENDER'},labelSpecification:{labelFormatType:'COMMON2D',imageType:'ZPLII',labelStockType:'STOCK_4X6'},requestedPackageLineItems:[{weight:{units:'LB',value:x.weight_lb},dimensions:{length:Math.ceil(x.length_in),width:Math.ceil(x.width_in),height:Math.ceil(x.height_in),units:'IN'}}]}};
     const fr=await fetch(c.base+'/ship/v1/shipments',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json','X-locale':'en_US'},body:JSON.stringify(payload)});const j=await fr.json().catch(()=>({}));
     if(!fr.ok){const e=new Error(fedexError(j));e.status=502;throw e}
     const ts=j?.output?.transactionShipments?.[0]||{};const piece=ts?.pieceResponses?.[0]||{};const doc=piece?.packageDocuments?.[0]||ts?.shipmentDocuments?.[0]||{};const label=doc?.encodedLabel||doc?.url||null;const tracking=piece?.trackingNumber||ts?.masterTrackingNumber||null;
     if(!tracking||!label)throw Object.assign(new Error('FedEx created the shipment but the tracking number or label was not returned.'),{status:502});
-    const isUrl=/^https?:\/\//i.test(label);const mime='application/vnd.fedex.epl2';
+    const isUrl=/^https?:\/\//i.test(label);const mime='application/octet-stream';
     const rate=ts?.shipmentRating?.shipmentRateDetails?.[0];const amount=Number(rate?.totalNetCharge||rate?.totalNetFedExCharge||0);const cents=Number.isFinite(amount)&&amount>0?Math.round(amount*100):null;
     const trackingUrl='https://www.fedex.com/fedextrack/?trknbr='+encodeURIComponent(tracking);
     const {rows}=await pool.query(`UPDATE ffl_requests SET shipping_carrier='FedEx',shipping_tracking_number=$1,shipping_tracking_url=$2,shipping_cost_cents=COALESCE($3,shipping_cost_cents),shipping_document_url=$4,fedex_label_data=$5,fedex_label_mime=$6,fedex_service_type=$7,fedex_shipment_id=$8,updated_at=now() WHERE id=$9 RETURNING *`,[tracking,trackingUrl,cents,isUrl?label:null,isUrl?null:label,mime,x.service_type,ts?.masterTrackingNumber||tracking,f.id]);
@@ -1389,8 +1389,8 @@ app.get('/api/ffl-requests/:id/fedex-label',auth,requireRole('viewer'),async(req
   if(f.shipping_document_url)return res.redirect(f.shipping_document_url);
   if(!f.fedex_label_data)return res.status(404).json({error:'No stored FedEx label for this request'});
   try{
-    const mime=f.fedex_label_mime||'application/vnd.fedex.epl2';
-    const ext=mime.toLowerCase().includes('epl')?'epl':(mime.toLowerCase().includes('pdf')?'pdf':'bin');
+    const mime=f.fedex_label_mime||'application/pdf';
+    const ext=mime.toLowerCase().includes('pdf')?'pdf':'bin';
     const safeRef=String(f.request_number||f.shipping_tracking_number||req.params.id).replace(/[^a-zA-Z0-9_-]/g,'_');
     const filename=`FedEx-Label-${safeRef}.${ext}`;
     const data=Buffer.from(String(f.fedex_label_data).replace(/^data:[^;]+;base64,/i,''),'base64');
