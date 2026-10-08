@@ -146,15 +146,22 @@ document.addEventListener("DOMContentLoaded",()=>{
     const title=document.querySelector("#inventory .head h2");
     if(title) title.textContent=category.toUpperCase();
 
-    const buttons=[...document.querySelectorAll("#filters button")];
     const wanted=category.toLowerCase();
-    const match=buttons.find(b=>{
-      const t=(b.textContent||"").trim().toLowerCase();
-      return t===wanted ||
-        (wanted==="ammunition" && (t==="ammo" || t==="ammunition")) ||
-        (wanted==="accessories" && t.includes("access"));
-    });
-    if(match) setTimeout(()=>match.click(),150);
+    const applyCategory=()=>{
+      const buttons=[...document.querySelectorAll("#filters button")];
+      const match=buttons.find(b=>{
+        const t=(b.textContent||"").trim().toLowerCase();
+        return t===wanted || (wanted==="ammunition" && t==="ammo") ||
+          (wanted==="accessories" && t.includes("access"));
+      });
+      if(match){match.click();return true;}
+      return false;
+    };
+    if(!applyCategory()){
+      const observer=new MutationObserver(()=>{if(applyCategory())observer.disconnect();});
+      const target=document.getElementById('filters');
+      if(target){observer.observe(target,{childList:true});setTimeout(()=>observer.disconnect(),10000);}
+    }
 
     setTimeout(()=>{
       document.getElementById("inventory")?.scrollIntoView({block:"start"});
@@ -386,6 +393,14 @@ function isAmmoItem(x){const c=String(x?.category||'').trim().toLowerCase();retu
 function isRegulatedStoreItem(x){return !!x&&(!!x.regulated||isFirearmItem(x)||isAmmoItem(x))}
 function cartHasPayPalIneligible(){return cart.some(r=>isRegulatedStoreItem(cartInventoryItem(r)))}
 function syncCheckoutPaymentOptions(){const blocked=cartHasPayPalIneligible();const wrap=document.getElementById('paypalCheckoutWrap'),note=document.getElementById('paypalCheckoutNote');if(wrap)wrap.style.display=blocked?'none':'';if(note&&blocked)note.textContent='PayPal is unavailable for firearms and ammunition. Use secure card checkout through Fortis.Tech.';return blocked}
+// Filter firearm sections by the explicit Firearm Type saved in Admin.
+// Older listings without a saved type stay in general Firearms until categorized.
+const firearmTypes=['Handguns','Rifles','Shotguns'];
+const firearmTypeValues={Handguns:'Handgun',Rifles:'Rifle',Shotguns:'Shotgun'};
+function firearmTypeMatches(item,type){
+  return String(item?.category||'').trim().toLowerCase()==='firearms' &&
+    String(item?.firearm_type||'').trim().toLowerCase()===firearmTypeValues[type]?.toLowerCase();
+}
 let activeCategory='All';
 function render(cat=activeCategory){
   activeCategory=cat||'All';
@@ -393,8 +408,8 @@ function render(cat=activeCategory){
   const cond=document.getElementById('conditionFilter')?.value||'';
   const min=Number(document.getElementById('minPrice')?.value||0)*100,maxRaw=document.getElementById('maxPrice')?.value,max=maxRaw?Number(maxRaw)*100:Infinity;
   const newOnly=!!document.getElementById('newOnly')?.checked,featuredOnly=!!document.getElementById('featuredOnly')?.checked,shippingOnly=!!document.getElementById('shippingOnly')?.checked,favoritesOnly=!!document.getElementById('favoritesOnly')?.checked;
-  const fixedCats=['Firearms','Ammunition','Hunting','Fishing','Outdoors','Archery & Bows','Accessories','Scopes','Red Dots','Automotive','Cameras','Jewelry','Tools','Music','Electronics','Gaming','Collectibles','Other'];const extraCats=[...new Set(data.map(x=>x.category).filter(Boolean).filter(c=>!fixedCats.includes(c)))];const cats=['All',...fixedCats,...extraCats];
-  let live=data.filter(x=>{const price=effectivePrice(x);const isNew=(Date.now()-new Date(x.created_at||x.updated_at||0).getTime())<1000*60*60*24*30;return Number(x.quantity)>0&&(activeCategory==='All'||x.category===activeCategory)&&(!q||[x.title,x.category,x.sku,x.description].some(v=>String(v||'').toLowerCase().includes(q)))&&(!cond||x.condition===cond)&&(price==null||(price>=min&&price<=max))&&(!newOnly||isNew)&&(!featuredOnly||x.featured)&&(!shippingOnly||!x.regulated)&&(!favoritesOnly||isFavorite(x.id))});
+  const fixedCats=['Firearms','Ammunition','Hunting','Fishing','Outdoors','Archery & Bows','Accessories','Scopes','Red Dots','Automotive','Cameras','Jewelry','Tools','Music','Electronics','Gaming','Collectibles','Other'];const extraCats=[...new Set(data.map(x=>x.category).filter(Boolean).filter(c=>!fixedCats.includes(c)))];const cats=['All',...fixedCats.slice(0,1),...firearmTypes,...fixedCats.slice(1),...extraCats.filter(c=>!firearmTypes.includes(c))];
+  let live=data.filter(x=>{const price=effectivePrice(x);const isNew=(Date.now()-new Date(x.created_at||x.updated_at||0).getTime())<1000*60*60*24*30;return Number(x.quantity)>0&&(activeCategory==='All'||(firearmTypes.includes(activeCategory)?firearmTypeMatches(x,activeCategory):x.category===activeCategory))&&(!q||[x.title,x.category,x.sku,x.description].some(v=>String(v||'').toLowerCase().includes(q)))&&(!cond||x.condition===cond)&&(price==null||(price>=min&&price<=max))&&(!newOnly||isNew)&&(!featuredOnly||x.featured)&&(!shippingOnly||!x.regulated)&&(!favoritesOnly||isFavorite(x.id))});
   const sort=document.getElementById('sortBox')?.value||'featured';
   live=[...live].sort((a,b)=>sort==='newest'?new Date(b.created_at||b.updated_at)-new Date(a.created_at||a.updated_at):sort==='priceLow'?(effectivePrice(a)??Infinity)-(effectivePrice(b)??Infinity):sort==='priceHigh'?(effectivePrice(b)??-1)-(effectivePrice(a)??-1):(Number(b.featured)-Number(a.featured)||new Date(b.updated_at)-new Date(a.updated_at)));
   const statItemsEl=document.getElementById('statItems');if(statItemsEl)statItemsEl.textContent=data.filter(x=>Number(x.quantity)>0).length;
