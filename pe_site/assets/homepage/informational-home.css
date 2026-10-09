@@ -109,3 +109,12 @@
 @media(max-width:650px){#info-home .info-wide-spotlight{padding:22px 12px!important}#info-home .info-wide-panel{grid-template-columns:1fr}#info-home .info-wide-copy{padding:20px}#info-home .info-wide-copy h2 br{display:none}}
 
 .general-merchandise-page .outdoorHub{display:none!important}
+
+#info-home .info-mobile-pawn{padding:18px 24px;margin-top:20px;background:#0c1115;border-top:1px solid #32393e;border-bottom:1px solid #32393e}
+#info-home .info-mobile-pawn>a{display:flex;align-items:center;gap:18px;max-width:900px;margin:auto;padding:12px 18px;border:1px solid #ff248c;border-radius:6px;background:#161c22}
+#info-home .info-mobile-pawn img{width:64px;height:64px;border-radius:12px;object-fit:contain;flex:none}
+#info-home .info-mobile-pawn strong{display:block;font:600 24px PE Oswald,sans-serif}
+#info-home .info-mobile-pawn small{display:block;margin-top:5px;font-size:14px;color:#d4d7dc}
+#info-home .info-mobile-pawn b{margin-left:auto;background:#ff248c;border-radius:3px;padding:12px 16px;font-size:12px;text-align:center}
+#info-home .info-mobile-pawn a:hover{background:#222831}
+@media(max-width:650px){#info-home .info-mobile-pawn{padding:15px 12px}#info-home .info-mobile-pawn>a{flex-wrap:wrap;padding:12px;gap:12px}#info-home .info-mobile-pawn img{width:52px;height:52px}#info-home .info-mobile-pawn strong{font-size:21px}#info-home .info-mobile-pawn small{font-size:12px}#info-home .info-mobile-pawn b{width:100%;margin:0}}
