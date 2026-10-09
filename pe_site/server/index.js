@@ -40,6 +40,8 @@ async function ensureSchema(){
   await pool.query(schema);
   // Repair older inventory rows that were categorized as regulated but accidentally saved with regulated=false.
   await pool.query(`UPDATE inventory SET regulated=true,updated_at=now() WHERE regulated=false AND lower(category) IN ('firearms','firearm','guns','gun','handguns','handgun','rifles','rifle','shotguns','shotgun','ammunition','ammo')`);
+  // One optional timed homepage feature. No inventory prices or orders are modified.
+  await pool.query(`CREATE TABLE IF NOT EXISTS homepage_deal (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), inventory_id uuid REFERENCES inventory(id) ON DELETE SET NULL, expires_at timestamptz, enabled boolean NOT NULL DEFAULT false, updated_at timestamptz NOT NULL DEFAULT now())`);
   await pool.query(`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS manufacturer text`);
    await pool.query(`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS firearm_type text`);
   await pool.query(`ALTER TABLE inventory ADD COLUMN IF NOT EXISTS model text`);
@@ -284,6 +286,37 @@ function firearmCategory(category){
 }
 function inventoryIsRegulated(inv){return !!inv&&(!!inv.regulated||regulatedCategory(inv.category));}
 function inventoryIsFirearm(inv){return !!inv&&firearmCategory(inv.category);}
+
+// Homepage Deal of the Week: display only, using the inventory's actual current price.
+app.get('/api/public/homepage-deal',async(_req,res)=>{
+  try {
+    const {rows}=await pool.query(`SELECT d.expires_at,i.id,i.title,i.image_url,i.price_cents,i.sale_price_cents,i.quantity,i.public_visible
+      FROM homepage_deal d JOIN inventory i ON i.id=d.inventory_id
+      WHERE d.singleton=true AND d.enabled=true AND d.expires_at>now() AND i.public_visible=true AND i.quantity>0 LIMIT 1`);
+    res.set('Cache-Control','no-store');res.json(rows[0]||null);
+  }catch(e){console.error('Public homepage deal',e);res.status(500).json({error:'Deal unavailable'});}
+});
+app.get('/api/admin/homepage-deal',auth,requireRole('viewer'),async(_req,res)=>{
+  try{const {rows}=await pool.query('SELECT inventory_id,expires_at,enabled FROM homepage_deal WHERE singleton=true');res.json(rows[0]||{inventory_id:null,expires_at:null,enabled:false});}
+  catch(e){console.error('Read homepage deal',e);res.status(500).json({error:'Could not load deal'});}
+});
+app.put('/api/admin/homepage-deal',auth,requireRole('manager'),async(req,res)=>{
+  const parsed=z.object({inventory_id:z.string().uuid(),expires_at:z.string().datetime({offset:true}),enabled:z.boolean()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:'Select a product and valid expiration date.'});
+  const {inventory_id,expires_at,enabled}=parsed.data;
+  if(enabled&&Date.parse(expires_at)<=Date.now())return res.status(400).json({error:'Expiration must be in the future.'});
+  try{
+    const {rows}=await pool.query('SELECT id FROM inventory WHERE id=$1 AND public_visible=true AND quantity>0',[inventory_id]);
+    if(!rows.length)return res.status(400).json({error:'Choose a visible product with available stock.'});
+    await pool.query(`INSERT INTO homepage_deal(singleton,inventory_id,expires_at,enabled) VALUES(true,$1,$2,$3)
+      ON CONFLICT(singleton) DO UPDATE SET inventory_id=EXCLUDED.inventory_id,expires_at=EXCLUDED.expires_at,enabled=EXCLUDED.enabled,updated_at=now()`,[inventory_id,expires_at,enabled]);
+    res.json({ok:true});
+  }catch(e){console.error('Save homepage deal',e);res.status(500).json({error:'Could not save deal'});}
+});
+app.delete('/api/admin/homepage-deal',auth,requireRole('manager'),async(_req,res)=>{
+  try{await pool.query('UPDATE homepage_deal SET enabled=false,updated_at=now() WHERE singleton=true');res.json({ok:true});}
+  catch(e){console.error('Disable homepage deal',e);res.status(500).json({error:'Could not disable deal'});}
+});
 
 app.get('/api/public/inventory',async (_req,res)=>{
   const started=Date.now();
