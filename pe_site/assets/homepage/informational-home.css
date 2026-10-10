@@ -126,20 +126,20 @@
 :is(#info-home,#info-home-header) .info-mobile-pawn-header:hover{background:#ff248c26}
 @media(max-width:650px){:is(#info-home,#info-home-header) .info-header-top{gap:8px}:is(#info-home,#info-home-header) .info-logo{width:100px;height:70px}:is(#info-home,#info-home-header) .info-header-link{font-size:10px;gap:4px}:is(#info-home,#info-home-header) .info-mobile-pawn-header{padding:5px;gap:5px}:is(#info-home,#info-home-header) .info-mobile-pawn-header img{width:24px;height:24px}:is(#info-home,#info-home-header) .info-mobile-pawn-header b{max-width:38px;white-space:normal;line-height:1.25}:is(#info-home,#info-home-header) .info-search-form{order:4}}
 /* Outdoor section shares the compact black-and-pink informational theme. */
-body>.outdoorHub{padding:18px 24px!important;background:#05090a;color:#fff}
-body>.outdoorHub>.wrap{width:100%;max-width:none;padding:0;margin:0}
-body>.outdoorHub .head{max-width:none;margin:0 0 12px;text-align:left}
-body>.outdoorHub .eyebrow{color:#ff248c;font-size:11px;letter-spacing:1.3px;margin-bottom:5px}
-body>.outdoorHub h2{border-left:5px solid #ff248c;padding-left:10px;text-transform:uppercase;font:900 23px/1.15 Arial,sans-serif;margin:0 0 6px}
-body>.outdoorHub .head p{font:12px/1.45 Arial,sans-serif;color:#c6cdd4;margin:0 0 0 15px}
-body>.outdoorHub .outdoorGrid{gap:12px}
-body>.outdoorHub .outdoorCard{height:190px;min-height:0;padding:14px 17px;border:1px solid #44484b;border-radius:5px;align-items:flex-start;background-color:#0e1113}
-body>.outdoorHub .outdoorCard:hover{transform:none;border-color:#ff248c}
-body>.outdoorHub .outdoorCard b{font:600 27px/1.15 'PE Oswald',sans-serif;margin:0;text-transform:uppercase}
-body>.outdoorHub .outdoorCard small{font:11px/1.35 Arial,sans-serif;color:#d3d7db;margin-top:4px}
-body>.outdoorHub .outdoorCard strong{display:inline-flex;padding:8px 12px;background:linear-gradient(#ff3798,#ed167c);border-radius:3px;color:white;font:900 11px/1 Arial,sans-serif;margin-top:10px;letter-spacing:0}
-@media(max-width:900px){body>.outdoorHub .outdoorGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:560px){body>.outdoorHub{padding:14px 12px!important}body>.outdoorHub h2{font-size:21px}body>.outdoorHub .outdoorCard{height:200px;padding:12px}body>.outdoorHub .outdoorCard b{font-size:21px}}
+#info-home .outdoorHub{padding:18px 24px!important;background:#05090a;color:#fff}
+#info-home .outdoorHub>.wrap{width:100%;max-width:none;padding:0;margin:0}
+#info-home .outdoorHub .head{max-width:none;margin:0 0 12px;text-align:left}
+#info-home .outdoorHub .eyebrow{color:#ff248c;font-size:11px;letter-spacing:1.3px;margin-bottom:5px}
+#info-home .outdoorHub h2{border-left:5px solid #ff248c;padding-left:10px;text-transform:uppercase;font:900 23px/1.15 Arial,sans-serif;margin:0 0 6px}
+#info-home .outdoorHub .head p{font:12px/1.45 Arial,sans-serif;color:#c6cdd4;margin:0 0 0 15px}
+#info-home .outdoorHub .outdoorGrid{gap:12px}
+#info-home .outdoorHub .outdoorCard{height:190px;min-height:0;padding:14px 17px;border:1px solid #44484b;border-radius:5px;align-items:flex-start;background-color:#0e1113}
+#info-home .outdoorHub .outdoorCard:hover{transform:none;border-color:#ff248c}
+#info-home .outdoorHub .outdoorCard b{font:600 27px/1.15 'PE Oswald',sans-serif;margin:0;text-transform:uppercase}
+#info-home .outdoorHub .outdoorCard small{font:11px/1.35 Arial,sans-serif;color:#d3d7db;margin-top:4px}
+#info-home .outdoorHub .outdoorCard strong{display:inline-flex;padding:8px 12px;background:linear-gradient(#ff3798,#ed167c);border-radius:3px;color:white;font:900 11px/1 Arial,sans-serif;margin-top:10px;letter-spacing:0}
+@media(max-width:900px){#info-home .outdoorHub .outdoorGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){#info-home .outdoorHub{padding:14px 12px!important}#info-home .outdoorHub h2{font-size:21px}#info-home .outdoorHub .outdoorCard{height:200px;padding:12px}#info-home .outdoorHub .outdoorCard b{font-size:21px}}
 
 /* Store information sits just above the final footer. */
 body>#contact{padding:24px;background:#05090a;color:white}
@@ -171,3 +171,6 @@ body>#orderLookup input{padding:9px 10px;font-size:12px;border:1px solid #394044
 body>#orderLookup .btn{color:white;padding:9px 12px;background:linear-gradient(#ff3798,#ed167c);border:0;border-radius:3px;font-size:11px}
 body>#orderLookup .lookupResult:empty{display:none}
 @media(max-width:650px){body>#orderLookup{padding:16px 12px}body>#orderLookup>.wrap{grid-template-columns:1fr;gap:12px}}
+
+#info-home .outdoorHub{padding:16px 0!important;margin:0!important;background:#05090a!important}
+#info-home .outdoorHub .wrap{padding:0!important}
