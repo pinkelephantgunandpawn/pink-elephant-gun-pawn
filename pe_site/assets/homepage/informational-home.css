@@ -140,3 +140,18 @@ body>.outdoorHub .outdoorCard small{font:11px/1.35 Arial,sans-serif;color:#d3d7d
 body>.outdoorHub .outdoorCard strong{display:inline-flex;padding:8px 12px;background:linear-gradient(#ff3798,#ed167c);border-radius:3px;color:white;font:900 11px/1 Arial,sans-serif;margin-top:10px;letter-spacing:0}
 @media(max-width:900px){body>.outdoorHub .outdoorGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:560px){body>.outdoorHub{padding:14px 12px!important}body>.outdoorHub h2{font-size:21px}body>.outdoorHub .outdoorCard{height:200px;padding:12px}body>.outdoorHub .outdoorCard b{font-size:21px}}
+
+/* Store information sits just above the final footer. */
+body>#contact{padding:24px;background:#05090a;color:white}
+body>#contact>.wrap{width:100%;max-width:none;padding:0}
+body>#contact .head{text-align:left;max-width:none;margin-bottom:16px}
+body>#contact .eyebrow{color:#ff248c;font-size:11px;letter-spacing:1.3px}
+body>#contact .head h2{font:900 23px/1.15 Arial,sans-serif;text-transform:uppercase;border-left:5px solid #ff248c;padding-left:10px;margin:6px 0}
+body>#contact .head p{font-size:12px;margin:0 0 0 15px;color:#c6cdd4}
+body>#contact .contact{gap:12px}
+body>#contact .box{background:#0e1113;border:1px solid #454443;border-radius:5px;padding:20px}
+body>#contact h3{font-family:'PE Oswald',sans-serif;text-transform:uppercase;font-size:22px}
+body>#contact .btn{background:linear-gradient(#ff3798,#ed167c);border:1px solid #ff248c;border-radius:3px;font-size:12px;padding:10px 14px}
+body>#contact .sisterDirections{border-color:#ff248c;border-radius:3px}
+body>#contact .launchTrust>div{border-radius:4px;border-color:#394044;background:#05090a}
+@media(max-width:650px){body>#contact{padding:20px 12px}body>#contact .head h2{font-size:21px}body>#contact .box{padding:16px}}
