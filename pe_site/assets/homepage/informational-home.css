@@ -118,3 +118,10 @@
 #info-home .info-mobile-pawn b{margin-left:auto;background:#ff248c;border-radius:3px;padding:12px 16px;font-size:12px;text-align:center}
 #info-home .info-mobile-pawn a:hover{background:#222831}
 @media(max-width:650px){#info-home .info-mobile-pawn{padding:15px 12px}#info-home .info-mobile-pawn>a{flex-wrap:wrap;padding:12px;gap:12px}#info-home .info-mobile-pawn img{width:52px;height:52px}#info-home .info-mobile-pawn strong{font-size:21px}#info-home .info-mobile-pawn small{font-size:12px}#info-home .info-mobile-pawn b{width:100%;margin:0}}
+
+/* Header shortcut to the MobilePawn app, immediately before Account. */
+#info-home .info-mobile-pawn-header{gap:7px;flex-shrink:0;padding:6px 8px;border:1px solid var(--pink);border-radius:4px}
+#info-home .info-mobile-pawn-header img{width:30px;height:30px;object-fit:contain;border-radius:6px}
+#info-home .info-mobile-pawn-header b{font:inherit}
+#info-home .info-mobile-pawn-header:hover{background:#ff248c26}
+@media(max-width:650px){#info-home .info-header-top{gap:8px}#info-home .info-logo{width:100px;height:70px}#info-home .info-header-link{font-size:10px;gap:4px}#info-home .info-mobile-pawn-header{padding:5px;gap:5px}#info-home .info-mobile-pawn-header img{width:24px;height:24px}#info-home .info-mobile-pawn-header b{max-width:38px;white-space:normal;line-height:1.25}#info-home .info-search-form{order:4}}
