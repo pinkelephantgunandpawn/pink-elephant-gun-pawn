@@ -1,6 +1,6 @@
 (() => {
   const hero = document.querySelector('#info-home .info-hero');
-  if (!hero || !document.documentElement.classList.contains('informational-home')) return;
+  if (!hero) return;
   const slides = [...hero.querySelectorAll('.info-hero-slide')];
   const dots = [...hero.querySelectorAll('.info-cycle-dots button')];
   const pause = hero.querySelector('.info-cycle-pause');
