@@ -59,3 +59,20 @@ test('read-only client allows only documented GET endpoints',async()=>{
   assert.ok(calls[1].url.endsWith('/item-properties'));
   assert.equal(client.getOrders,undefined);
 });
+
+test('read-only client treats supplier error codes in HTTP 200 as failures',async()=>{
+  const client=createChattanoogaClient({sid:'s',token:'privateToken',fetchImpl:async()=>({ok:true,status:200,json:async()=>({error_code:9000,message:'private supplier detail'})})});
+  await assert.rejects(client.getItems(),err=>err.name==='ChattanoogaApiError'&&err.code===9000&&!err.message.includes('private supplier detail'));
+});
+test('read-only client encodes item filters without modifying endpoint or HTTP method',async()=>{
+  const calls=[];
+  const client=createChattanoogaClient({sid:'s',token:'t',fetchImpl:async(url,options)=>{calls.push({url:String(url),method:options.method});return {ok:true,status:200,json:async()=>({items:[]})};}});
+  await client.getItems({item_ids:'ABC & 123',page:1,per_page:1});
+  assert.equal(calls.length,1);
+  const url=new URL(calls[0].url);
+  assert.equal(url.origin,'https://api.chattanoogashooting.com');
+  assert.equal(url.pathname,'/rest/v6/items');
+  assert.equal(url.searchParams.get('item_ids'),'ABC & 123');
+  assert.equal(url.searchParams.get('page'),'1');
+  assert.equal(calls[0].method,'GET');
+});
