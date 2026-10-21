@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createChattanoogaClient } from './chattanooga_client.js';
-import { summarizeCssiReadiness, classifyCssiMapFormat } from './chattanooga_inspect.js';
+import { summarizeCssiReadiness, classifyCssiMapFormat, summarizeCssiProbeResponse } from './chattanooga_inspect.js';
 // Standalone test service: NO store database, checkout, orders, or production website.
 // Does not return supplier records or credentials to public callers.
 let state={status:'starting',checked_at:null};
@@ -9,6 +9,7 @@ async function check(){
   try{
     const data=await createChattanoogaClient().getItems({page:1,per_page:1});
     const rootKeys=Object.keys(data||{}).slice(0,20);
+    const responseShape=summarizeCssiProbeResponse(data);
     const records=Array.isArray(data)?data:(Array.isArray(data?.items)?data.items:Array.isArray(data?.data)?data.data:[]);
     const itemKeys=records.length?Object.keys(records[0]).slice(0,50):[];
     const fieldTypes=records.length?Object.fromEntries(Object.entries(records[0]).map(([k,v])=>[k,Array.isArray(v)?'array':v===null?'null':typeof v])):{};
@@ -22,11 +23,11 @@ async function check(){
     // Supplier access requirements and rate limits must be clarified before any further probing.
     const feed={status:'not_checked',reason:'supplier_endpoint_unverified'};
     // Output only field names, never prices, supplier IDs, or tokens.
-    console.log('Chattanooga read-only probe OK',JSON.stringify({rootKeys,itemKeys,fieldTypes,nestedKeys,fieldReadiness,mapFormats,feed}));
+    console.log('Chattanooga read-only probe OK',JSON.stringify({rootKeys,itemKeys,fieldTypes,nestedKeys,responseShape,fieldReadiness,mapFormats,feed}));
     state={status:'connected',checked_at:new Date().toISOString(),rootKeys,itemKeys,fieldTypes,nestedKeys,fieldReadiness,feed};
   }catch(e){
     console.error('Chattanooga read-only probe failed',e?.status||'request_error',e?.code||'');
     state={status:'connection_failed',checked_at:new Date().toISOString()};
   }
 }
-http.createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');if(req.url!=='/health'){res.writeHead(404);res.end('{}');return;}res.end(JSON.stringify({ok:true,service:'chattanooga-isolated-test',...state}));}).listen(Number(process.env.PORT||10000),'0.0.0.0',()=>{console.log('Isolated Chattanooga probe listening');check();});
+http.createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');if(req.url!=='/health'){res.writeHead(404);res.end('{}');return;}res.end(JSON.stringify({ok:true,api_connected:state.status==='connected',service:'chattanooga-isolated-test',...state}));}).listen(Number(process.env.PORT||10000),'0.0.0.0',()=>{console.log('Isolated Chattanooga probe listening');check();});
