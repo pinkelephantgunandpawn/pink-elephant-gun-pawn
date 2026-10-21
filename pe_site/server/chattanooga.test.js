@@ -39,3 +39,23 @@ test('supplier MAP string parsing and reference optic price',()=>{
   assert.equal(override.belowMap,false);
   assert.equal(override.suggestedCents,20000);
 });
+
+test('read-only API client preserves supplier error status without exposing response secrets',async()=>{
+  const client=createChattanoogaClient({sid:'testSid',token:'privateToken',fetchImpl:async()=>({ok:false,status:422,json:async()=>({error_code:9000,message:'sensitive upstream detail'})})});
+  await assert.rejects(client.getProductFeed({page:1,per_page:1}),err=>err.status===422&&err.code===9000&&!err.message.includes('sensitive upstream detail'));
+});
+test('read-only API client rejects invalid JSON',async()=>{
+  const client=createChattanoogaClient({sid:'testSid',token:'privateToken',fetchImpl:async()=>({ok:true,status:200,json:async()=>{throw Error('bad JSON');}})});
+  await assert.rejects(client.getItems(),err=>err.status===200&&err.name==='ChattanoogaApiError');
+});
+test('read-only client allows only documented GET endpoints',async()=>{
+  const calls=[];
+  const client=createChattanoogaClient({sid:'s',token:'t',fetchImpl:async(url,options)=>{calls.push({url:String(url),method:options.method});return {ok:true,status:200,json:async()=>({items:[]})};}});
+  await client.getProductFeed();
+  await client.getItemProperties();
+  assert.equal(calls.length,2);
+  assert.ok(calls.every(c=>c.method==='GET'));
+  assert.ok(calls[0].url.endsWith('/items/product-feed'));
+  assert.ok(calls[1].url.endsWith('/item-properties'));
+  assert.equal(client.getOrders,undefined);
+});
