@@ -18,12 +18,9 @@ async function check(){
       map_price:classifyCssiMapFormat(records[0].map_price),
       retail_map_price:classifyCssiMapFormat(records[0].retail_map_price)
     } : null;
-    let feed={status:'unavailable'};
-    try {
-      const payload=await createChattanoogaClient().getProductFeed({page:1,per_page:1});
-      const entries=Array.isArray(payload?.items)?payload.items:Array.isArray(payload?.product_feed)?payload.product_feed:Array.isArray(payload?.data)?payload.data:[];
-      feed={status:'connected',rootKeys:Object.keys(payload||{}).slice(0,20),itemKeys:entries[0]?Object.keys(entries[0]).slice(0,70):[],fieldTypes:entries[0]?Object.fromEntries(Object.entries(entries[0]).map(([k,v])=>[k,Array.isArray(v)?'array':v===null?'null':typeof v])):{}};
-    }catch(e){feed={status:'request_failed',httpStatus:e?.status||null,errorCode:e?.code||null};}
+    // Do not automatically retry the product-feed endpoint; it previously returned 422 and then 429.
+    // Supplier access requirements and rate limits must be clarified before any further probing.
+    const feed={status:'not_checked',reason:'supplier_endpoint_unverified'};
     // Output only field names, never prices, supplier IDs, or tokens.
     console.log('Chattanooga read-only probe OK',JSON.stringify({rootKeys,itemKeys,fieldTypes,nestedKeys,fieldReadiness,mapFormats,feed}));
     state={status:'connected',checked_at:new Date().toISOString(),rootKeys,itemKeys,fieldTypes,nestedKeys,fieldReadiness,feed};
