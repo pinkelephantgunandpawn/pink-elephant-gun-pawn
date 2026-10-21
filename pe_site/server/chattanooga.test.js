@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createChattanoogaClient, validateProductFeedParams } from './chattanooga_client.js';
+import { createChattanoogaClient, validateProductFeedParams, validateItemsParams } from './chattanooga_client.js';
 import { inspectCassiItem, summarizeCssiReadiness, classifyCssiMapFormat, summarizeCssiProbeResponse } from './chattanooga_inspect.js';
 import { retailPriceCents, normalizeCatalogStatus, parseSupplierMoneyCents, evaluateMapPrice } from './chattanooga_pricing.js';
 
@@ -206,4 +206,31 @@ test('official V6 product-feed parameter contract rejects undocumented paginatio
   assert.equal(requests,0);
   const allowed=validateProductFeedParams({manufacturer_ids:'AA',primary_image_only_flag:1});
   assert.equal(allowed.manufacturer_ids,'AA');
+});
+
+test('V6 item query validator enforces documented page and filter limits without network requests',()=>{
+  const ok=validateItemsParams({page:'2',per_page:'50',item_ids:'ITEM-A,ITEM-B'});
+  assert.equal(ok.per_page,'50');
+  assert.throws(()=>validateItemsParams({page:0}),RangeError);
+  assert.throws(()=>validateItemsParams({page:1.5}),RangeError);
+  assert.throws(()=>validateItemsParams({per_page:51}),RangeError);
+  assert.throws(()=>validateItemsParams({per_page:'abc'}),RangeError);
+  assert.throws(()=>validateItemsParams({page:1,unexpected:'x'}),RangeError);
+  assert.throws(()=>validateItemsParams({item_ids:'a'.repeat(25)}),RangeError);
+  assert.throws(()=>validateItemsParams({upc_codes:'1'.repeat(14)}),RangeError);
+  assert.throws(()=>validateItemsParams({item_ids:Array.from({length:51},(_,i)=>'ID'+i).join(',')}),RangeError);
+  assert.throws(()=>validateItemsParams({manufacturer_ids:Array.from({length:11},(_,i)=>String(i)).join(',')}),RangeError);
+  assert.throws(()=>validateItemsParams({item_ids:'ID1,'}),RangeError);
+  assert.throws(()=>validateItemsParams({item_ids:['ID1']}),TypeError);
+  assert.throws(()=>validateItemsParams(null),TypeError);
+});
+test('invalid item query is rejected locally before contacting supplier',()=>{
+  let requests=0;
+  const client=createChattanoogaClient({sid:'s',token:'t',fetchImpl:async()=>{
+    requests++;
+    return {ok:true,status:200,json:async()=>({items:[]})};
+  }});
+  assert.throws(()=>client.getItems({per_page:100}),RangeError);
+  assert.throws(()=>client.getItems({page:-1}),RangeError);
+  assert.equal(requests,0);
 });
