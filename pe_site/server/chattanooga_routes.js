@@ -12,14 +12,26 @@ export function createChattanoogaRouter(pool) {
   const text=(v,n=255)=>String(v??'').trim().slice(0,n);
   const money=(v)=>parseSupplierMoneyCents(v);
   const list=(body)=>Array.isArray(body)?body:(Array.isArray(body?.items)?body.items:Array.isArray(body?.product_feed)?body.product_feed:Array.isArray(body?.data)?body.data:[]);
+  // Conservative catalog scope: only identifiable firearms and optics. Unknown items stay out.
+  const scope=(x)=>{
+    const fields=[x.category_name,x.category,x.product_category,x.department_name,x.department,x.product_type,x.subcategory_name,x.subcategory].map(v=>String(v??'')).join(' ').toLowerCase();
+    const name=String(x.name??x.title??x.description??'').toLowerCase();
+    const excluded=/powder|primer|ammunition|ammo|magazine|reloading|holster|mount|ring|base|battery|cleaning|knife|suppressor|silencer|airgun|pellet|accessor/;
+    if(excluded.test(fields)||excluded.test(name))return null;
+    if(/firearm|rifle|shotgun|handgun|pistol|revolver/.test(fields))return 'Firearms';
+    if(/optic|riflescope|scope|red dot|reflex sight|binocular|rangefinder|spotting scope/.test(fields))return 'Optics';
+    if(/riflescope|scope|red dot|reflex sight|binocular|rangefinder|spotting scope/.test(name))return 'Optics';
+    return null;
+  };
   const normalize=(x)=>{
     const id=text(x.cssi_id??x.item_id??x.itemId??x.id??x.sku,120);
     const title=text(x.name??x.title??x.description,180);
     if(!id||!title) return null;
+    const catalogCategory=scope(x);if(!catalogCategory)return null;
     const rawCost=x.drop_ship_price??x.cost??x.dealer_price??x.wholesale_price??x.unit_cost;
     if(rawCost===undefined||rawCost===null)return null;
     let costCents;try{costCents=money(rawCost);}catch{return null;}
-    return {id,title,category:text(x.category_name??x.category??x.product_category??x.department_name??x.department??'Uncategorized',80)||'Uncategorized',
+    return {id,title,category:catalogCategory,
       brand:text(x.manufacturer??x.brand,120),sku:text(x.sku??x.cssi_id??x.item_id??id,80),upc:text(x.upc??x.upc_code,80),
       description:text(x.long_description??x.product_description??x.description??'',4000),
       image_url:text(x.image_url??x.image??x.primary_image_url??'',1000),
@@ -54,7 +66,7 @@ export function createChattanoogaRouter(pool) {
       for(const id of requestedIds){
         const result=await client().getItems({item_ids:id});
         const item=list(result).map(normalize).find(x=>x?.id===id);
-        if(!item)return res.status(422).json({error:'Unable to verify product cost and inventory with supplier',item_id:id});
+        if(!item)return res.status(422).json({error:'Product is not a verified firearm/optic or supplier cost and stock could not be confirmed',item_id:id});
         normalized.push(item);
       }
     }catch(e){return res.status(502).json({error:'Supplier verification unavailable; nothing staged'});}
@@ -83,7 +95,7 @@ export function createChattanoogaRouter(pool) {
   router.post('/products/:id/approve',async(req,res)=>{
     try {
       const {rows}=await pool.query(`UPDATE distributor_catalog SET review_status='approved',reviewed_at=now(),updated_at=now()
-        WHERE id=$1 AND review_status='pending' RETURNING id,review_status,status`,[req.params.id]);
+        WHERE id=$1 AND review_status='pending' AND category IN ('Firearms','Optics') RETURNING id,review_status,status`,[req.params.id]);
       if(!rows.length)return res.status(409).json({error:'Product not pending approval or not found'});
       res.json({...rows[0],published:false});
     }catch(e){fail(res,e);}
