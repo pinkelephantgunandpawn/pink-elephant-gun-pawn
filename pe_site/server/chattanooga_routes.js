@@ -14,7 +14,7 @@ export function createChattanoogaRouter(pool) {
   const list=(body)=>Array.isArray(body)?body:(Array.isArray(body?.items)?body.items:Array.isArray(body?.product_feed)?body.product_feed:Array.isArray(body?.data)?body.data:[]);
   const normalize=(x)=>{
     const id=text(x.cssi_id??x.item_id??x.itemId??x.id??x.sku,120);
-    const title=text(x.description??x.name??x.title,180);
+    const title=text(x.name??x.title??x.description,180);
     if(!id||!title) return null;
     const rawCost=x.drop_ship_price??x.cost??x.dealer_price??x.wholesale_price??x.unit_cost;
     if(rawCost===undefined||rawCost===null||!Number.isFinite(Number(rawCost))||Number(rawCost)<0)return null;
@@ -26,7 +26,7 @@ export function createChattanoogaRouter(pool) {
   };
   router.get('/health',(_req,res)=>res.json({configured:!!(process.env.CHATTANOOGA_SID&&process.env.CHATTANOOGA_TOKEN),version:'v6',default_markup:20,ordering_enabled:false}));
   router.get('/remote',async(req,res)=>{try{
-    const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,50,50);
+    const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,10,10);
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
     const data=await client().getItems({page,per_page});
     res.set('Cache-Control','no-store');
