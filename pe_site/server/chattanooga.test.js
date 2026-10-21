@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createChattanoogaClient } from './chattanooga_client.js';
-import { inspectCassiItem, summarizeCssiReadiness, classifyCssiMapFormat } from './chattanooga_inspect.js';
+import { inspectCassiItem, summarizeCssiReadiness, classifyCssiMapFormat, summarizeCssiProbeResponse } from './chattanooga_inspect.js';
 import { retailPriceCents, normalizeCatalogStatus, parseSupplierMoneyCents, evaluateMapPrice } from './chattanooga_pricing.js';
 
 test('default 20 percent markup and override', () => {
@@ -157,4 +157,22 @@ test('read-only MAP format classifier reports shapes, never prices',()=>{
     assert.equal(shape,expected);
     assert.ok(!shape.includes('149'));
   }
+});
+
+test('isolated supplier probe distinguishes connection response from valid catalog shape',()=>{
+  const good=summarizeCssiProbeResponse({pagination:{page:1},items:[{cssi_id:'ABC',name:'Sample optic'}]});
+  assert.deepEqual(good,{
+    items_array_present:true,
+    sample_item_present:true,
+    sample_identity_valid:true,
+    catalog_schema_verified:true,
+    safe_to_import:false
+  });
+  assert.equal(summarizeCssiProbeResponse({items:[]}).catalog_schema_verified,false);
+  assert.equal(summarizeCssiProbeResponse({items:[{name:'Missing supplier ID'}]}).sample_identity_valid,false);
+  assert.equal(summarizeCssiProbeResponse({data:[{cssi_id:'1',name:'Other shape'}]}).items_array_present,false);
+  assert.equal(summarizeCssiProbeResponse(null).catalog_schema_verified,false);
+  assert.ok(Object.values(good).every(x=>typeof x==='boolean'));
+  assert.ok(Object.isFrozen(good));
+  assert.ok(!JSON.stringify(good).includes('Sample optic'));
 });
