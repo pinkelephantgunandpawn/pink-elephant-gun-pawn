@@ -1,6 +1,6 @@
 // Admin-only catalog preview transforms. No database writes, supplier orders or public dealer costs.
 const money=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0?Math.round(value*100):null;
-export function catalogPreview(items,{marginPercent=25}={}) {
+export function catalogPreview(items,{marginPercent=20}={}) {
  if(!Array.isArray(items)||items.length>50) throw new RangeError('Maximum 50 items per preview');
  if(!Number.isFinite(marginPercent)||marginPercent<0||marginPercent>500) throw new RangeError('Invalid margin');
  return items.map(item=>{
@@ -14,6 +14,6 @@ export function catalogPreview(items,{marginPercent=25}={}) {
     drop_ship_eligible:item?.drop_ship_flag===1,
     ffl_required:item?.ffl_flag===1||item?.serialized_flag===1,
     dealer_cost_cents:cost,map_cents:map,provisional_price_cents:suggested,
-    publishable:false,blockers:['shipping_cost_unverified','supplier_cost_semantics_unverified','manual_approval_required']};
+    publishable:false,approval_status:'pending',blockers:['shipping_cost_unverified','supplier_cost_semantics_unverified','manual_approval_required']};
  });
 }
