@@ -31,11 +31,14 @@ export function createChattanoogaRouter(pool) {
     const rawCost=x.drop_ship_price??x.cost??x.dealer_price??x.wholesale_price??x.unit_cost;
     if(rawCost===undefined||rawCost===null)return null;
     let costCents;try{costCents=money(rawCost);}catch{return null;}
+    const mapRaw=x.retail_map_price;
+    let mapCents=null;
+    if(mapRaw!==undefined&&mapRaw!==null&&String(mapRaw).trim()!==''){try{mapCents=money(mapRaw);}catch{mapCents=null;}}
     return {id,title,category:catalogCategory,
       brand:text(x.manufacturer??x.brand,120),sku:text(x.sku??x.cssi_id??x.item_id??id,80),upc:text(x.upc??x.upc_code,80),
       description:text(x.long_description??x.product_description??x.description??'',4000),
       image_url:text(x.image_url??x.image??x.primary_image_url??'',1000),
-      cost_cents:costCents,quantity:Math.max(0,Math.floor(Number(x.inventory??x.quantity_available??x.available_quantity??x.quantity??x.qty??0)||0)),raw:x};
+      map_cents:mapCents,cost_cents:costCents,quantity:Math.max(0,Math.floor(Number(x.inventory??x.quantity_available??x.available_quantity??x.quantity??x.qty??0)||0)),raw:x};
   };
   router.get('/health',(_req,res)=>res.json({configured:!!(process.env.CHATTANOOGA_SID&&process.env.CHATTANOOGA_TOKEN),version:'v6',default_markup:20,ordering_enabled:false}));
   router.get('/remote',async(req,res)=>{try{
@@ -43,7 +46,7 @@ export function createChattanoogaRouter(pool) {
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
     const data=await client().getItems({page,per_page});
     res.set('Cache-Control','no-store');
-    res.json({data,normalized:list(data).map(normalize).filter(Boolean),page,per_page});
+    res.json({normalized:list(data).map(normalize).filter(Boolean).map(({raw,...item})=>item),page,per_page});
   }catch(e){res.status(e.status===401?502:502).json({error:'Chattanooga catalog unavailable',code:e.code??null});}});
   router.get('/categories',async(_req,res)=>{try{const {rows}=await pool.query("SELECT category,count(*)::int AS total,count(*) FILTER (WHERE status='draft')::int AS drafts,count(*) FILTER (WHERE status='published')::int AS published FROM distributor_catalog GROUP BY category ORDER BY category");res.json(rows);}catch(e){fail(res,e);}});
   router.get('/products',async(req,res)=>{try{
