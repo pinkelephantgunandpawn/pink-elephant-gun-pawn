@@ -1,0 +1,137 @@
+// Read-only CSSI V6 field inspection. Never publishes, imports, or places orders.
+// A field being present does not establish its business meaning (e.g. custom_price).
+export function inspectCassiItem(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TypeError('Expected a supplier item object');
+  const id = typeof item.cssi_id === 'string' && item.cssi_id.trim() ? item.cssi_id.trim() : null;
+  const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim() : null;
+  const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+  // A dealer portal may display a dash when MAP is not provided.
+  // Preserve missing vs malformed values without guessing what the API uses.
+  const mapField = (value) => {
+    if (value === null || value === undefined || (typeof value === 'string' && ['', '-'].includes(value.trim()))) {
+      return {status:'missing',value:null};
+    }
+    if (typeof value === 'string' && /^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(value.trim())) {
+      return {status:'present',value:value.trim()};
+    }
+    return {status:'invalid',value:null};
+  };
+  const map = mapField(item.map_price);
+  const retailMap = mapField(item.retail_map_price);
+  const inventory = Number.isSafeInteger(item.inventory) && item.inventory >= 0 ? item.inventory : null;
+  return Object.freeze({
+    cssi_id: id,
+    name,
+    inventory,
+    custom_price_candidate: numeric(item.custom_price),
+    map_price: map.value,
+    retail_map_price: retailMap.value,
+    map_field_status: map.status,
+    retail_map_field_status: retailMap.status,
+    drop_ship_price: numeric(item.drop_ship_price),
+    retail_price: numeric(item.retail_price),
+    valid_identity: Boolean(id && name),
+    price_meaning_verified: false,
+    safe_to_import: false
+  });
+}
+
+/** Safe to expose on the isolated probe: booleans only, never supplier records. */
+export function summarizeCssiReadiness(item) {
+  const x = inspectCassiItem(item);
+  return Object.freeze({
+    identity_valid: x.valid_identity,
+    inventory_field_valid: x.inventory !== null,
+    custom_price_field_valid: x.custom_price_candidate !== null,
+    map_field_valid: x.map_field_status === 'present',
+    retail_map_field_valid: x.retail_map_field_status === 'present',
+    map_field_missing: x.map_field_status === 'missing',
+    retail_map_field_missing: x.retail_map_field_status === 'missing',
+    price_meaning_verified: x.price_meaning_verified,
+    safe_to_import: x.safe_to_import
+  });
+}
+
+/**
+ * Diagnose a MAP field's representation without returning its actual value.
+ * Classification does not imply MAP applicability or authorize import.
+ */
+export function classifyCssiMapFormat(value) {
+  if (value === undefined || value === null) return 'absent';
+  if (typeof value === 'number') return Number.isFinite(value) ? 'numeric_type' : 'nonfinite_number';
+  if (typeof value !== 'string') return 'other_type';
+  const s = value.trim();
+  if (!s) return 'blank';
+  if (s === '-') return 'dash';
+  if (/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(s)) return 'plain_money';
+  if (/^(?:0|[1-9]\d*)\.\d{3,}$/.test(s)) return 'extra_decimal_places';
+  if (/^\$/.test(s)) return 'currency_symbol';
+  if (/^[-+]\d/.test(s)) return 'signed_number';
+  return 'other_string';
+}
+
+/**
+ * Classify the isolated probe's response shape without revealing any supplier data.
+ * Connectivity is distinct from having a usable catalog record.
+ */
+export function summarizeCssiProbeResponse(data) {
+  const hasItemsArray = Boolean(data && typeof data === 'object' && !Array.isArray(data) && Array.isArray(data.items));
+  const items = hasItemsArray ? data.items : [];
+  const first = items[0];
+  const validFirstItem = Boolean(first && typeof first === 'object' && !Array.isArray(first) && inspectCassiItem(first).valid_identity);
+  return Object.freeze({
+    items_array_present: hasItemsArray,
+    sample_item_present: items.length > 0,
+    sample_identity_valid: validFirstItem,
+    catalog_schema_verified: hasItemsArray && validFirstItem,
+    safe_to_import: false
+  });
+}
+
+/**
+ * Compare API values to dealer-portal reference snapshots without disclosing
+ * any actual supplier values. Matches are point-in-time observations, not
+ * confirmation of pricing policy, cost semantics, or import readiness.
+ */
+export function compareCssiPortalReferences(data, references) {
+  if (!Array.isArray(references) || references.length < 1 || references.length > 2) {
+    throw new TypeError('Expected one or two reference items');
+  }
+  const items = Array.isArray(data?.items) ? data.items : [];
+  const moneyCents = value => {
+    if (typeof value !== 'number' && typeof value !== 'string') return null;
+    const str = String(value).trim();
+    if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(str)) return null;
+    const [whole, decimal = ''] = str.split('.');
+    const cents = Number(whole) * 100 + Number(decimal.padEnd(2, '0'));
+    return Number.isSafeInteger(cents) ? cents : null;
+  };
+  const results = {};
+  for (const ref of references) {
+    if (!ref || typeof ref.label !== 'string' || !/^[a-z][a-z0-9_]{0,30}$/.test(ref.label)
+      || typeof ref.cssi_id !== 'string' || !ref.cssi_id) throw new TypeError('Invalid reference');
+    const item = items.find(x => x && typeof x === 'object' && x.cssi_id === ref.cssi_id);
+    const matchMoney = (key, expectedCents) => {
+      if (!item) return 'not_found';
+      const actual = moneyCents(item[key]);
+      if (actual === null) return 'missing_or_invalid';
+      return actual === expectedCents ? 'match' : 'different';
+    };
+    results[ref.label] = Object.freeze({
+      item_found: Boolean(item),
+      custom_price_vs_portal: matchMoney('custom_price', ref.portalCostCents),
+      retail_price_vs_portal: matchMoney('retail_price', ref.portalCostCents),
+      drop_ship_price_vs_portal: matchMoney('drop_ship_price', ref.portalCostCents),
+      custom_price_vs_previous: ref.portalPreviousCents == null ? 'not_applicable' : matchMoney('custom_price', ref.portalPreviousCents),
+      retail_price_vs_previous: ref.portalPreviousCents == null ? 'not_applicable' : matchMoney('retail_price', ref.portalPreviousCents),
+      drop_ship_price_vs_previous: ref.portalPreviousCents == null ? 'not_applicable' : matchMoney('drop_ship_price', ref.portalPreviousCents),
+      map_price_vs_portal: ref.portalMapCents === null ? 'not_applicable' : matchMoney('map_price', ref.portalMapCents),
+      retail_map_price_vs_portal: ref.portalMapCents === null ? 'not_applicable' : matchMoney('retail_map_price', ref.portalMapCents),
+      map_price_missing: Boolean(item && (item.map_price === '' || item.map_price == null)),
+      retail_map_price_missing: Boolean(item && (item.retail_map_price === '' || item.retail_map_price == null)),
+      inventory_matches_portal: Boolean(item && item.inventory === ref.portalInventory),
+      safe_to_import: false
+    });
+  }
+  return Object.freeze(results);
+}

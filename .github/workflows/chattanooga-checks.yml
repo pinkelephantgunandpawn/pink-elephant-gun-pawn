@@ -1,0 +1,32 @@
+name: Chattanooga integration checks
+on:
+  pull_request:
+    paths:
+      - 'pe_site/server/chattanooga*'
+      - 'pe_site/server/index.js'
+      - 'pe_site/chattanooga.html'
+      - 'chattanooga-test.Dockerfile'
+      - '.github/workflows/chattanooga-checks.yml'
+  push:
+    branches:
+      - 'feature/chattanooga-draft-catalog'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check syntax
+        run: |
+          node --check pe_site/server/index.js
+          node --check pe_site/server/chattanooga_client.js
+          node --check pe_site/server/chattanooga_routes.js
+          node --check pe_site/server/chattanooga_pricing.js
+          node --check pe_site/server/chattanooga_inspect.js
+          node --check pe_site/server/chattanooga_probe.js
+      - name: Run Chattanooga tests
+        run: node --test pe_site/server/chattanooga.test.js
+      - name: Build isolated Chattanooga test image
+        run: docker build -f chattanooga-test.Dockerfile -t chattanooga-isolated-check .

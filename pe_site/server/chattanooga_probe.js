@@ -1,0 +1,41 @@
+import http from 'node:http';
+import { summarizeCatalogPreflight } from './chattanooga_preflight.js';
+import { createChattanoogaClient } from './chattanooga_client.js';
+import { summarizeCssiReadiness, classifyCssiMapFormat, summarizeCssiProbeResponse, compareCssiPortalReferences } from './chattanooga_inspect.js';
+// Standalone test service: NO store database, checkout, orders, or production website.
+// Does not return supplier records or credentials to public callers.
+let state={status:'starting',checked_at:null};
+async function check(){
+  if(!process.env.CHATTANOOGA_SID||!process.env.CHATTANOOGA_TOKEN){state={status:'credentials_missing',checked_at:new Date().toISOString()};return;}
+  try{
+    // Single bounded, read-only lookup of two dealer-supplied item numbers.
+    // No retries, no product feed, and no raw dealer prices in logs or responses.
+    const data=await createChattanoogaClient().getItems({item_ids:'XISOR5101,ZOTHRD22',page:1,per_page:2});
+    const portalComparison=compareCssiPortalReferences(data,[
+      {label:'romeo5',cssi_id:'XISOR5101',portalCostCents:11388,portalPreviousCents:11999,portalMapCents:null,portalInventory:32},
+      {label:'zerotech',cssi_id:'ZOTHRD22',portalCostCents:9599,portalPreviousCents:9719,portalMapCents:14900,portalInventory:9}
+    ]);
+    const rootKeys=Object.keys(data||{}).slice(0,20);
+    const responseShape=summarizeCssiProbeResponse(data);
+    const records=Array.isArray(data)?data:(Array.isArray(data?.items)?data.items:Array.isArray(data?.data)?data.data:[]);
+    const catalogPreflight=summarizeCatalogPreflight(records);
+    const itemKeys=records.length?Object.keys(records[0]).slice(0,50):[];
+    const fieldTypes=records.length?Object.fromEntries(Object.entries(records[0]).map(([k,v])=>[k,Array.isArray(v)?'array':v===null?'null':typeof v])):{};
+    const nestedKeys=records.length?Object.fromEntries(Object.entries(records[0]).filter(([k,v])=>v&&typeof v==='object'&&!Array.isArray(v)).map(([k,v])=>[k,Object.keys(v).slice(0,30)])):{};
+    const fieldReadiness=records[0] && typeof records[0]==='object' && !Array.isArray(records[0]) ? summarizeCssiReadiness(records[0]) : null;
+    const mapFormats=records[0] && typeof records[0]==='object' && !Array.isArray(records[0]) ? {
+      map_price:classifyCssiMapFormat(records[0].map_price),
+      retail_map_price:classifyCssiMapFormat(records[0].retail_map_price)
+    } : null;
+    // Do not automatically retry the product-feed endpoint; it previously returned 422 and then 429.
+    // Supplier access requirements and rate limits must be clarified before any further probing.
+    const feed={status:'not_checked',reason:'supplier_endpoint_unverified'};
+    // Output only field names, never prices, supplier IDs, or tokens.
+    console.log('Chattanooga read-only probe OK',JSON.stringify({rootKeys,itemKeys,fieldTypes,nestedKeys,responseShape,fieldReadiness,mapFormats,portalComparison,catalogPreflight,feed}));
+    state={status:'connected',checked_at:new Date().toISOString(),rootKeys,itemKeys,fieldTypes,nestedKeys,responseShape,fieldReadiness,mapFormats,catalogPreflight,feed};
+  }catch(e){
+    console.error('Chattanooga read-only probe failed',e?.status||'request_error',e?.code||'');
+    state={status:'connection_failed',checked_at:new Date().toISOString()};
+  }
+}
+http.createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');if(req.url!=='/health'){res.writeHead(404);res.end('{}');return;}res.end(JSON.stringify({ok:true,api_connected:state.status==='connected',service:'chattanooga-isolated-test',...state}));}).listen(Number(process.env.PORT||10000),'0.0.0.0',()=>{console.log('Isolated Chattanooga probe listening');check();});

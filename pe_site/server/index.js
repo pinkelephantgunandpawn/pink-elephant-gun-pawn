@@ -18,6 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { createChattanoogaRouter } from './chattanooga_routes.js';
 
 const { Pool } = pg;
 const app = express();
@@ -38,6 +39,8 @@ const __dirname = path.dirname(__filename);
 async function ensureSchema(){
   const schema=await fs.readFile(path.join(__dirname,'schema.sql'),'utf8');
   await pool.query(schema);
+  const distributorSchema=await fs.readFile(path.join(__dirname,'chattanooga_catalog.sql'),'utf8');
+  await pool.query(distributorSchema);
   // Repair older inventory rows that were categorized as regulated but accidentally saved with regulated=false.
   await pool.query(`UPDATE inventory SET regulated=true,updated_at=now() WHERE regulated=false AND lower(category) IN ('firearms','firearm','guns','gun','handguns','handgun','rifles','rifle','shotguns','shotgun','ammunition','ammo')`);
   // One optional timed homepage feature. No inventory prices or orders are modified.
@@ -258,6 +261,7 @@ function auth(req,res,next){
 }
 const requireRole=min => (req,res,next)=> roles[req.user?.role] >= roles[min] ? next() : res.status(403).json({error:'Insufficient permissions'});
 
+app.use('/api/admin/chattanooga',auth,requireRole('manager'),createChattanoogaRouter(pool));
 app.get('/health', async (_req,res)=>{ try{await pool.query('SELECT 1'); res.json({ok:true,service:'pink-elephant-web',uptime_seconds:Math.round(process.uptime()),timestamp:new Date().toISOString()});}catch{res.status(503).json({ok:false,timestamp:new Date().toISOString()});} });
 app.get('/api/admin/production-readiness',auth,requireRole('viewer'),async(_req,res)=>{
   const cfg=fortisTechConfig();let database=false;try{await pool.query('SELECT 1');database=true}catch{}
