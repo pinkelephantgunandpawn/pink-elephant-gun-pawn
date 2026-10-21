@@ -45,7 +45,18 @@ export function createChattanoogaRouter(pool) {
   }catch(e){fail(res,e);}});
   router.post('/stage',async(req,res)=>{const raw=Array.isArray(req.body?.items)?req.body.items:[];
     if(!raw.length||raw.length>100)return res.status(400).json({error:'Select 1–100 products'});
-    const normalized=raw.map(normalize);if(normalized.some(x=>!x))return res.status(400).json({error:'Invalid item or missing cost; verify supplier fields'});
+    // Never trust client-submitted wholesale cost, availability or metadata.
+    const requestedIds=raw.map(x=>text(x.item_id??x.itemId??x.id??x.sku,120));
+    if(requestedIds.some(x=>!x)||new Set(requestedIds).size!==requestedIds.length)return res.status(400).json({error:'Invalid or duplicate supplier IDs'});
+    const normalized=[];
+    try {
+      for(const id of requestedIds){
+        const result=await client().getItems({item_ids:id});
+        const item=list(result).map(normalize).find(x=>x?.id===id);
+        if(!item)return res.status(422).json({error:'Unable to verify product cost and inventory with supplier',item_id:id});
+        normalized.push(item);
+      }
+    }catch(e){return res.status(502).json({error:'Supplier verification unavailable; nothing staged'});}
     const db=await pool.connect();try{await db.query('BEGIN');
       for(const x of normalized){await db.query(`INSERT INTO distributor_catalog(supplier_item_id,title,category,brand,sku,upc,description,image_url,cost_cents,available_quantity,raw_data,last_synced_at)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
@@ -69,8 +80,12 @@ export function createChattanoogaRouter(pool) {
       const x=rows[0];if(!x){await db.query('ROLLBACK');return res.status(404).json({error:'Not found'});}
       if(!x.cost_cents){await db.query('ROLLBACK');return res.status(422).json({error:'Cannot publish item without verified cost'});}
       const price=retailPriceCents(x.cost_cents,Number(x.markup_percent),x.price_override_cents);
-      // Conservative policy: all distributor products are hidden from checkout pending category/FFL review.
-      // Publishing makes the listing visible; existing regulated checkout controls remain in place.
+      // Fail closed while supplier classification schema is unverified.
+      const safeCategories=new Set(['optics','scopes','binoculars','rangefinders','hunting clothing','apparel','cleaning supplies']);
+      if(!safeCategories.has(x.category.toLowerCase().trim())){
+        await db.query('ROLLBACK');
+        return res.status(422).json({error:'Category requires compliance review before publication'});
+      }
       const regulated=/firearm|rifle|shotgun|handgun|pistol|ammo|ammunition|receiver|silencer|suppressor/i.test(x.category);
       const sku='CSSI-'+x.supplier_item_id;
       if(x.inventory_id){
