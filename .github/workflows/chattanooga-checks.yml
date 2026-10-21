@@ -5,6 +5,7 @@ on:
       - 'pe_site/server/chattanooga*'
       - 'pe_site/server/index.js'
       - 'pe_site/chattanooga.html'
+      - 'chattanooga-test.Dockerfile'
       - '.github/workflows/chattanooga-checks.yml'
   push:
     branches:
@@ -23,5 +24,9 @@ jobs:
           node --check pe_site/server/chattanooga_client.js
           node --check pe_site/server/chattanooga_routes.js
           node --check pe_site/server/chattanooga_pricing.js
+          node --check pe_site/server/chattanooga_inspect.js
+          node --check pe_site/server/chattanooga_probe.js
       - name: Run Chattanooga tests
         run: node --test pe_site/server/chattanooga.test.js
+      - name: Build isolated Chattanooga test image
+        run: docker build -f chattanooga-test.Dockerfile -t chattanooga-isolated-check .
