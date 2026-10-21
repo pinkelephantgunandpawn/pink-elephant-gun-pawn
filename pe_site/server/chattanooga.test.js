@@ -176,3 +176,18 @@ test('isolated supplier probe distinguishes connection response from valid catal
   assert.ok(Object.isFrozen(good));
   assert.ok(!JSON.stringify(good).includes('Sample optic'));
 });
+
+test('read-only client does not retry supplier rate-limited responses',async()=>{
+  let requests=0;
+  const client=createChattanoogaClient({sid:'testSid',token:'privateToken',fetchImpl:async()=>{
+    requests++;
+    return {ok:false,status:429,json:async()=>({error_code:'too-many-requests',message:'supplier internal details'})};
+  }});
+  await assert.rejects(client.getItems({page:1,per_page:1}),err=>
+    err.name==='ChattanoogaApiError' &&
+    err.status===429 &&
+    err.code==='too-many-requests' &&
+    !err.message.includes('supplier internal details')
+  );
+  assert.equal(requests,1);
+});
