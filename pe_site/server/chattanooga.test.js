@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createChattanoogaClient } from './chattanooga_client.js';
+import { createChattanoogaClient, validateProductFeedParams } from './chattanooga_client.js';
 import { inspectCassiItem, summarizeCssiReadiness, classifyCssiMapFormat, summarizeCssiProbeResponse } from './chattanooga_inspect.js';
 import { retailPriceCents, normalizeCatalogStatus, parseSupplierMoneyCents, evaluateMapPrice } from './chattanooga_pricing.js';
 
@@ -43,7 +43,7 @@ test('supplier MAP string parsing and reference optic price',()=>{
 
 test('read-only API client preserves supplier error status without exposing response secrets',async()=>{
   const client=createChattanoogaClient({sid:'testSid',token:'privateToken',fetchImpl:async()=>({ok:false,status:422,json:async()=>({error_code:9000,message:'sensitive upstream detail'})})});
-  await assert.rejects(client.getProductFeed({page:1,per_page:1}),err=>err.status===422&&err.code===9000&&!err.message.includes('sensitive upstream detail'));
+  await assert.rejects(client.getProductFeed(),err=>err.status===422&&err.code===9000&&!err.message.includes('sensitive upstream detail'));
 });
 test('read-only API client rejects invalid JSON',async()=>{
   const client=createChattanoogaClient({sid:'testSid',token:'privateToken',fetchImpl:async()=>({ok:true,status:200,json:async()=>{throw Error('bad JSON');}})});
@@ -190,4 +190,20 @@ test('read-only client does not retry supplier rate-limited responses',async()=>
     !err.message.includes('supplier internal details')
   );
   assert.equal(requests,1);
+});
+
+test('official V6 product-feed parameter contract rejects undocumented pagination without network requests',async()=>{
+  let requests=0;
+  const client=createChattanoogaClient({sid:'s',token:'t',fetchImpl:async()=>{
+    requests++;
+    return {ok:true,status:200,json:async()=>({product_feed:{url:'https://example.invalid/feed.csv'}})};
+  }});
+  assert.throws(()=>validateProductFeedParams({page:1}),RangeError);
+  assert.throws(()=>validateProductFeedParams({per_page:1}),RangeError);
+  assert.throws(()=>validateProductFeedParams({unknown:'value'}),RangeError);
+  assert.throws(()=>validateProductFeedParams(null),TypeError);
+  await assert.rejects(client.getProductFeed({page:1,per_page:1}),RangeError);
+  assert.equal(requests,0);
+  const allowed=validateProductFeedParams({manufacturer_ids:'AA',primary_image_only_flag:1});
+  assert.equal(allowed.manufacturer_ids,'AA');
 });
