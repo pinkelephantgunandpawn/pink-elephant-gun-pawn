@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createChattanoogaClient } from './chattanooga_client.js';
+import { inspectCassiItem } from './chattanooga_inspect.js';
 import { retailPriceCents, normalizeCatalogStatus, parseSupplierMoneyCents, evaluateMapPrice } from './chattanooga_pricing.js';
 
 test('default 20 percent markup and override', () => {
@@ -75,4 +76,26 @@ test('read-only client encodes item filters without modifying endpoint or HTTP m
   assert.equal(url.searchParams.get('item_ids'),'ABC & 123');
   assert.equal(url.searchParams.get('page'),'1');
   assert.equal(calls[0].method,'GET');
+});
+
+test('CSSI V6 field inspection is read-only and does not assume custom_price is dealer cost',()=>{
+  const sample={cssi_id:'123',name:'Sample optic',custom_price:139.99,inventory:9,map_price:'189.00',retail_map_price:'189.00',drop_ship_price:145,retail_price:210};
+  const result=inspectCassiItem(sample);
+  assert.equal(result.cssi_id,'123');
+  assert.equal(result.inventory,9);
+  assert.equal(result.map_price,'189.00');
+  assert.equal(result.custom_price_candidate,139.99);
+  assert.equal(result.price_meaning_verified,false);
+  assert.equal(result.safe_to_import,false);
+  assert.equal(sample.name,'Sample optic');
+  assert.ok(Object.isFrozen(result));
+});
+test('CSSI inspection fails closed on absent identity, invalid quantities and malformed prices',()=>{
+  const result=inspectCassiItem({cssi_id:'',name:'Item',inventory:-1,custom_price:'139.99',map_price:'N/A'});
+  assert.equal(result.valid_identity,false);
+  assert.equal(result.inventory,null);
+  assert.equal(result.custom_price_candidate,null);
+  assert.equal(result.map_price,null);
+  assert.equal(result.safe_to_import,false);
+  assert.throws(()=>inspectCassiItem(null),TypeError);
 });
