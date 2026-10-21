@@ -54,3 +54,10 @@ These values are from dealer portal screenshots, **not** direct API responses. D
 A 20% markup on $95.99 is $115.19, below the portal's displayed $149.00 Retail MAP. The read-only `evaluateMapPrice` helper suggests $149.00 in that example; do not apply this to storefront pricing until MAP semantics and API cost mapping are confirmed.
 
 The read-only inspector now distinguishes a missing MAP value (null, absent, empty, or dash) from an invalid/unrecognized MAP value. The live probe previously saw unrecognized MAP formats in its first sample; this alone does not establish that MAP is absent. It is not yet known how the API encodes a portal dash.
+
+## Isolated API probe update (October 21, 2026)
+- On the latest isolated Render test deployment, `GET /items?page=1&per_page=1` still succeeded.
+- Both `map_price` and `retail_map_price` on **that sampled API record** were blank strings, not malformed prices. This does not establish the MAP format for all products.
+- A subsequent automatic `GET /items/product-feed` request returned HTTP 429 with supplier error code `too-many-requests`. Earlier calls returned HTTP 422, code 9000.
+- Automatic product-feed calls were disabled in `chattanooga_probe.js` to avoid repeated unsuccessful/rate-limited requests. Further testing of that endpoint requires supplier documentation or support guidance.
+- The portal examples for the Romeo5 and ZeroTech products are not matched to this API sample; no dealer-price field mapping has been proven.
