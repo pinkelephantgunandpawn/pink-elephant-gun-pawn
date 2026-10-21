@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { summarizeCatalogPreflight } from './chattanooga_preflight.js';
 import { createChattanoogaClient } from './chattanooga_client.js';
 import { summarizeCssiReadiness, classifyCssiMapFormat, summarizeCssiProbeResponse, compareCssiPortalReferences } from './chattanooga_inspect.js';
 // Standalone test service: NO store database, checkout, orders, or production website.
@@ -17,6 +18,7 @@ async function check(){
     const rootKeys=Object.keys(data||{}).slice(0,20);
     const responseShape=summarizeCssiProbeResponse(data);
     const records=Array.isArray(data)?data:(Array.isArray(data?.items)?data.items:Array.isArray(data?.data)?data.data:[]);
+    const catalogPreflight=summarizeCatalogPreflight(records);
     const itemKeys=records.length?Object.keys(records[0]).slice(0,50):[];
     const fieldTypes=records.length?Object.fromEntries(Object.entries(records[0]).map(([k,v])=>[k,Array.isArray(v)?'array':v===null?'null':typeof v])):{};
     const nestedKeys=records.length?Object.fromEntries(Object.entries(records[0]).filter(([k,v])=>v&&typeof v==='object'&&!Array.isArray(v)).map(([k,v])=>[k,Object.keys(v).slice(0,30)])):{};
@@ -29,8 +31,8 @@ async function check(){
     // Supplier access requirements and rate limits must be clarified before any further probing.
     const feed={status:'not_checked',reason:'supplier_endpoint_unverified'};
     // Output only field names, never prices, supplier IDs, or tokens.
-    console.log('Chattanooga read-only probe OK',JSON.stringify({rootKeys,itemKeys,fieldTypes,nestedKeys,responseShape,fieldReadiness,mapFormats,portalComparison,feed}));
-    state={status:'connected',checked_at:new Date().toISOString(),rootKeys,itemKeys,fieldTypes,nestedKeys,responseShape,fieldReadiness,mapFormats,feed};
+    console.log('Chattanooga read-only probe OK',JSON.stringify({rootKeys,itemKeys,fieldTypes,nestedKeys,responseShape,fieldReadiness,mapFormats,portalComparison,catalogPreflight,feed}));
+    state={status:'connected',checked_at:new Date().toISOString(),rootKeys,itemKeys,fieldTypes,nestedKeys,responseShape,fieldReadiness,mapFormats,catalogPreflight,feed};
   }catch(e){
     console.error('Chattanooga read-only probe failed',e?.status||'request_error',e?.code||'');
     state={status:'connection_failed',checked_at:new Date().toISOString()};
