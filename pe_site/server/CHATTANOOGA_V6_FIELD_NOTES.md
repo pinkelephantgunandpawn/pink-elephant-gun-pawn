@@ -61,3 +61,16 @@ The read-only inspector now distinguishes a missing MAP value (null, absent, emp
 - A subsequent automatic `GET /items/product-feed` request returned HTTP 429 with supplier error code `too-many-requests`. Earlier calls returned HTTP 422, code 9000.
 - Automatic product-feed calls were disabled in `chattanooga_probe.js` to avoid repeated unsuccessful/rate-limited requests. Further testing of that endpoint requires supplier documentation or support guidance.
 - The portal examples for the Romeo5 and ZeroTech products are not matched to this API sample; no dealer-price field mapping has been proven.
+
+## Public third-party documentation research (October 21, 2026)
+
+**These are leads, not first-party REST V6 field definitions or proof of account-specific pricing.**
+
+- [Flxpoint: Chattanooga as a Source](https://support.flxpoint.com/en_US/firearm-tactical/chattanooga-as-a-source) documents mapping "Retail Price / Custom Price" to internal cost, with the choice depending on the integration configuration. It maps "Retail MAP Price" to MAP, and mentions quantity, SKU, UPC, manufacturer, descriptions and images. This supports `retail_map_price` as a **MAP candidate**, not a proven REST V6 mapping for this account. The portal's "Your Price" must still be cross-checked.
+- [FirearmCart Chattanooga integration](https://docs.firearmcart.com/integrations/chattanooga/) says a Chattanooga dealer-account feed contains cost, MSRP, MAP, stock, UPC, imagery and specifications. It says product-feed requests can fail or time out; this does not explain the observed HTTP 422/429 errors or document endpoint parameters.
+- [Chattanooga fulfillment agreement](https://form.jotform.com/223624916917059) states manufacturers' MAP and UPP must be followed, and warns that supplier stock displayed on a customer's website may be inaccurate. Do not automatically publish items or promise availability based solely on `inventory`.
+- [MicroBiz Chattanooga credential instructions](https://cloudv2.microbizcloud.com/support/solutions/articles/9000272880-setting-up-vendor-credentials-in-pricecompare-firearm-vendor-distributor-feeds) confirms dealer-account SID and token and notes additional account authorization may be required for certain API ordering operations. This does not establish the cause of the product-feed HTTP errors.
+
+**Open questions:** Does `custom_price` match the portal's current sale "Your Price" for the same SKU? Is `retail_map_price` exactly the portal's "Retail MAP" for the same SKU? What is the supplier's recommended available-to-sell quantity? What are the allowed feed request parameters and rate limits?
+
+No production catalog mapping or automatic pricing changes should be made from these third-party descriptions alone.
