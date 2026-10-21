@@ -69,3 +69,21 @@ export function classifyCssiMapFormat(value) {
   if (/^[-+]\d/.test(s)) return 'signed_number';
   return 'other_string';
 }
+
+/**
+ * Classify the isolated probe's response shape without revealing any supplier data.
+ * Connectivity is distinct from having a usable catalog record.
+ */
+export function summarizeCssiProbeResponse(data) {
+  const hasItemsArray = Boolean(data && typeof data === 'object' && !Array.isArray(data) && Array.isArray(data.items));
+  const items = hasItemsArray ? data.items : [];
+  const first = items[0];
+  const validFirstItem = Boolean(first && typeof first === 'object' && !Array.isArray(first) && inspectCassiItem(first).valid_identity);
+  return Object.freeze({
+    items_array_present: hasItemsArray,
+    sample_item_present: items.length > 0,
+    sample_identity_valid: validFirstItem,
+    catalog_schema_verified: hasItemsArray && validFirstItem,
+    safe_to_import: false
+  });
+}
