@@ -74,3 +74,17 @@ The read-only inspector now distinguishes a missing MAP value (null, absent, emp
 **Open questions:** Does `custom_price` match the portal's current sale "Your Price" for the same SKU? Is `retail_map_price` exactly the portal's "Retail MAP" for the same SKU? What is the supplier's recommended available-to-sell quantity? What are the allowed feed request parameters and rate limits?
 
 No production catalog mapping or automatic pricing changes should be made from these third-party descriptions alone.
+
+## Verified first-party V6 reference (dealer-supplied documentation)
+
+The dealer provided the text of the official V6 documentation. It confirms:
+
+- The item lookup endpoint is `GET /items`; supported filters include `item_ids` and `upc_codes`. Its `per_page` maximum is 50.
+- The item lookup response contains an `items` array and `pagination`.
+- The product-feed endpoint `GET /items/product-feed` returns a JSON object containing `product_feed.url` for a CSV file. Its documented parameters do not include `page` or `per_page`.
+- An example item has `map_price: ""`, confirming that an empty MAP string is a documented value.
+- HTTP 422 with `error_code: 9000` means data validation failed. A response can also include an `errors` array with specific property and subcode details.
+
+The earlier product-feed test sent pagination parameters not documented for that endpoint. Those parameters are a possible reason for the 422 response, but the original error details were not retained, so the cause remains unconfirmed. The endpoint must not be automatically retried while rate limits are unresolved.
+
+The documentation does not explicitly define which account-specific API price matches the dealer portal's displayed purchase price. No pricing or publication automation is approved based on this reference alone.
