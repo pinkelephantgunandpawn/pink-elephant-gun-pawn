@@ -21,3 +21,17 @@ export function inspectCassiItem(item) {
     safe_to_import: false
   });
 }
+
+/** Safe to expose on the isolated probe: booleans only, never supplier records. */
+export function summarizeCssiReadiness(item) {
+  const x = inspectCassiItem(item);
+  return Object.freeze({
+    identity_valid: x.valid_identity,
+    inventory_field_valid: x.inventory !== null,
+    custom_price_field_valid: x.custom_price_candidate !== null,
+    map_field_valid: x.map_price !== null,
+    retail_map_field_valid: x.retail_map_price !== null,
+    price_meaning_verified: x.price_meaning_verified,
+    safe_to_import: x.safe_to_import
+  });
+}
