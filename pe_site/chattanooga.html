@@ -4,7 +4,7 @@
 <div class="panel"><h2>1. Browse Chattanooga</h2><div class="toolbar"><button id="connect">Load distributor catalog</button><button id="previous">Previous page</button><span id="page">Page 1</span><button id="next">Next page</button><label><input id="all" type="checkbox"> Select visible</label><button id="stage">Add selected to drafts</button></div><p class="muted" id="connection">API credentials must be configured in Render. Product fields will be verified against live data.</p><div class="grid" id="remote"></div></div>
 <div class="panel"><h2>2. Review drafts & published items</h2><div class="toolbar"><select id="category"><option value="">All categories</option></select><select id="status"><option value="draft">Drafts</option><option value="published">Published</option><option value="hidden">Hidden</option><option value="">All statuses</option></select><input id="search" placeholder="Search name, brand, SKU or UPC"><button id="refresh">Refresh</button><button id="sync">Sync staged inventory (up to 100)</button></div><div class="grid" id="products"></div></div><p id="message" role="status"></p>
 <script>
-const API=(window.PE_API_BASE||localStorage.getItem('pe_api_base')||'https://pink-elephant-gun-pawn.onrender.com').replace(/\/$/,'');
+const API=window.location.origin; // Keep admin bearer tokens on the same origin; never trust browser storage for an API host.
 const token=localStorage.getItem('pe_token');if(!token){document.body.innerHTML='<h2>Admin sign-in required</h2><a href="/admin">Go to admin login</a>';throw Error('Not signed in');}
 const $=id=>document.getElementById(id),escapeHtml=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let page=1,remote=[],selected=new Set();
