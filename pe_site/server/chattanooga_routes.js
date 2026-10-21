@@ -26,9 +26,9 @@ export function createChattanoogaRouter(pool) {
   };
   router.get('/health',(_req,res)=>res.json({configured:!!(process.env.CHATTANOOGA_SID&&process.env.CHATTANOOGA_TOKEN),version:'v6',default_markup:20,ordering_enabled:false}));
   router.get('/remote',async(req,res)=>{try{
-    const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,50,100);
-    const feed=req.query.feed==='1';
-    const data=await (feed?client().getProductFeed({page,per_page}):client().getItems({page,per_page}));
+    const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,50,50);
+    if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
+    const data=await client().getItems({page,per_page});
     res.set('Cache-Control','no-store');
     res.json({data,normalized:list(data).map(normalize).filter(Boolean),page,per_page});
   }catch(e){res.status(e.status===401?502:502).json({error:'Chattanooga catalog unavailable',code:e.code??null});}});
