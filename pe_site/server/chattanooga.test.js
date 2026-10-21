@@ -237,20 +237,24 @@ test('invalid item query is rejected locally before contacting supplier',()=>{
 
 test('read-only portal comparison matches exact item IDs and reveals no supplier values',()=>{
   const refs=[
-    {label:'romeo5',cssi_id:'XISOR5101',portalCostCents:11388,portalMapCents:null,portalInventory:32},
-    {label:'zerotech',cssi_id:'ZOTHRD22',portalCostCents:9599,portalMapCents:14900,portalInventory:9}
+    {label:'romeo5',cssi_id:'XISOR5101',portalCostCents:11388,portalPreviousCents:11999,portalMapCents:null,portalInventory:32},
+    {label:'zerotech',cssi_id:'ZOTHRD22',portalCostCents:9599,portalPreviousCents:9719,portalMapCents:14900,portalInventory:9}
   ];
   const data={items:[
-    {cssi_id:'XISOR5101',name:'Secret Romeo Name',custom_price:113.88,retail_price:200,inventory:32,map_price:'',retail_map_price:''},
-    {cssi_id:'ZOTHRD22',name:'Secret ZeroTech Name',custom_price:95.99,retail_price:160,inventory:9,map_price:'',retail_map_price:'149.00'}
+    {cssi_id:'XISOR5101',name:'Secret Romeo Name',custom_price:113.88,retail_price:200,drop_ship_price:119.99,inventory:32,map_price:'',retail_map_price:''},
+    {cssi_id:'ZOTHRD22',name:'Secret ZeroTech Name',custom_price:95.99,retail_price:160,drop_ship_price:97.19,inventory:9,map_price:'',retail_map_price:'149.00'}
   ]};
   const result=compareCssiPortalReferences(data,refs);
   assert.equal(result.romeo5.item_found,true);
   assert.equal(result.romeo5.custom_price_vs_portal,'match');
   assert.equal(result.romeo5.retail_price_vs_portal,'different');
   assert.equal(result.romeo5.map_price_vs_portal,'not_applicable');
+  assert.equal(result.romeo5.drop_ship_price_vs_previous,'match');
+  assert.equal(result.romeo5.drop_ship_price_vs_portal,'different');
   assert.equal(result.romeo5.map_price_missing,true);
   assert.equal(result.zerotech.item_found,true);
+  assert.equal(result.zerotech.drop_ship_price_vs_previous,'match');
+  assert.equal(result.zerotech.custom_price_vs_previous,'different');
   assert.equal(result.zerotech.custom_price_vs_portal,'match');
   assert.equal(result.zerotech.retail_map_price_vs_portal,'match');
   assert.equal(result.zerotech.map_price_vs_portal,'missing_or_invalid');
