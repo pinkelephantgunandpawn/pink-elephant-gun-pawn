@@ -23,6 +23,18 @@ export function createChattanoogaRouter(pool) {
     if(/riflescope|scope|red dot|reflex sight|binocular|rangefinder|spotting scope/.test(name))return 'Optics';
     return null;
   };
+  const imageUrl=(x)=>{
+    const candidates=[x.image_url,x.primary_image_url,x.image,x.image_link,x.image_uri,x.product_image_url,x.product_image,x.main_image_url,x.thumbnail_url,x.images,x.product_images];
+    for(const candidate of candidates){
+      const entries=Array.isArray(candidate)?candidate:[candidate];
+      for(const entry of entries){
+        const value=typeof entry==='string'?entry:entry&&typeof entry==='object'?(entry.url??entry.image_url??entry.src??entry.large??entry.original):null;
+        if(typeof value!=='string')continue;
+        try{const u=new URL(value);if(u.protocol==='https:'&&u.username===''&&u.password==='')return text(u.href,1000);}catch{}
+      }
+    }
+    return '';
+  };
   const normalize=(x)=>{
     const id=text(x.cssi_id??x.item_id??x.itemId??x.id??x.sku,120);
     const title=text(x.name??x.title??x.description,180);
@@ -37,7 +49,7 @@ export function createChattanoogaRouter(pool) {
     return {id,title,category:catalogCategory,
       brand:text(x.manufacturer??x.brand,120),sku:text(x.sku??x.cssi_id??x.item_id??id,80),upc:text(x.upc??x.upc_code,80),
       description:text(x.long_description??x.product_description??x.description??'',4000),
-      image_url:text(x.image_url??x.image??x.primary_image_url??'',1000),
+      image_url:imageUrl(x),
       map_cents:mapCents,cost_cents:costCents,quantity:Math.max(0,Math.floor(Number(x.inventory??x.quantity_available??x.available_quantity??x.quantity??x.qty??0)||0)),raw:x};
   };
   router.get('/health',(_req,res)=>res.json({configured:!!(process.env.CHATTANOOGA_SID&&process.env.CHATTANOOGA_TOKEN),version:'v6',default_markup:20,ordering_enabled:false}));
