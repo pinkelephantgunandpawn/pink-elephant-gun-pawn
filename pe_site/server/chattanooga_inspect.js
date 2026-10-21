@@ -87,3 +87,47 @@ export function summarizeCssiProbeResponse(data) {
     safe_to_import: false
   });
 }
+
+/**
+ * Compare API values to dealer-portal reference snapshots without disclosing
+ * any actual supplier values. Matches are point-in-time observations, not
+ * confirmation of pricing policy, cost semantics, or import readiness.
+ */
+export function compareCssiPortalReferences(data, references) {
+  if (!Array.isArray(references) || references.length < 1 || references.length > 2) {
+    throw new TypeError('Expected one or two reference items');
+  }
+  const items = Array.isArray(data?.items) ? data.items : [];
+  const moneyCents = value => {
+    if (typeof value !== 'number' && typeof value !== 'string') return null;
+    const str = String(value).trim();
+    if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(str)) return null;
+    const [whole, decimal = ''] = str.split('.');
+    const cents = Number(whole) * 100 + Number(decimal.padEnd(2, '0'));
+    return Number.isSafeInteger(cents) ? cents : null;
+  };
+  const results = {};
+  for (const ref of references) {
+    if (!ref || typeof ref.label !== 'string' || !/^[a-z][a-z0-9_]{0,30}$/.test(ref.label)
+      || typeof ref.cssi_id !== 'string' || !ref.cssi_id) throw new TypeError('Invalid reference');
+    const item = items.find(x => x && typeof x === 'object' && x.cssi_id === ref.cssi_id);
+    const matchMoney = (key, expectedCents) => {
+      if (!item) return 'not_found';
+      const actual = moneyCents(item[key]);
+      if (actual === null) return 'missing_or_invalid';
+      return actual === expectedCents ? 'match' : 'different';
+    };
+    results[ref.label] = Object.freeze({
+      item_found: Boolean(item),
+      custom_price_vs_portal: matchMoney('custom_price', ref.portalCostCents),
+      retail_price_vs_portal: matchMoney('retail_price', ref.portalCostCents),
+      map_price_vs_portal: ref.portalMapCents === null ? 'not_applicable' : matchMoney('map_price', ref.portalMapCents),
+      retail_map_price_vs_portal: ref.portalMapCents === null ? 'not_applicable' : matchMoney('retail_map_price', ref.portalMapCents),
+      map_price_missing: Boolean(item && (item.map_price === '' || item.map_price == null)),
+      retail_map_price_missing: Boolean(item && (item.retail_map_price === '' || item.retail_map_price == null)),
+      inventory_matches_portal: Boolean(item && item.inventory === ref.portalInventory),
+      safe_to_import: false
+    });
+  }
+  return Object.freeze(results);
+}
