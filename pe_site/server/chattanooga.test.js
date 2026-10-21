@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createChattanoogaClient } from './chattanooga_client.js';
-import { inspectCassiItem } from './chattanooga_inspect.js';
+import { inspectCassiItem, summarizeCssiReadiness } from './chattanooga_inspect.js';
 import { retailPriceCents, normalizeCatalogStatus, parseSupplierMoneyCents, evaluateMapPrice } from './chattanooga_pricing.js';
 
 test('default 20 percent markup and override', () => {
@@ -98,4 +98,18 @@ test('CSSI inspection fails closed on absent identity, invalid quantities and ma
   assert.equal(result.map_price,null);
   assert.equal(result.safe_to_import,false);
   assert.throws(()=>inspectCassiItem(null),TypeError);
+});
+
+test('isolated CSSI readiness summary exposes booleans, not supplier values',()=>{
+  const item={cssi_id:'SECRET-ITEM-123',name:'Private optic name',inventory:9,custom_price:139.99,map_price:'189.00',retail_map_price:'189.00'};
+  const summary=summarizeCssiReadiness(item);
+  assert.equal(summary.identity_valid,true);
+  assert.equal(summary.inventory_field_valid,true);
+  assert.equal(summary.custom_price_field_valid,true);
+  assert.equal(summary.map_field_valid,true);
+  assert.equal(summary.price_meaning_verified,false);
+  assert.equal(summary.safe_to_import,false);
+  assert.ok(Object.values(summary).every(x=>typeof x==='boolean'));
+  const json=JSON.stringify(summary);
+  for(const sensitive of ['SECRET-ITEM-123','Private optic name','139.99','189.00']) assert.ok(!json.includes(sensitive));
 });
