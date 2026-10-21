@@ -21,7 +21,7 @@ test('read-only client sends documented auth and does not expose secrets', async
   assert.deepEqual(await client.getItems({page:2,per_page:50}),{items:[]});
   assert.equal(calls[0].url,'https://api.chattanoogashooting.com/rest/v6/items?page=2&per_page=50');
   assert.equal(calls[0].options.headers.Authorization,'Basic '+sid+':'+createHash('md5').update(token).digest('hex'));
-  await assert.rejects(()=>client.getItems({page:1}).then(()=>client.getOrders()),/getOrders/);
+  assert.equal(typeof client.getOrders,'undefined');
 });
 test('API error does not leak credentials', async () => {
   const client=createChattanoogaClient({sid:'s',token:'secret',fetchImpl:async()=>({ok:false,status:401,json:async()=>({error_code:4001})})});
