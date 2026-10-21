@@ -11,8 +11,8 @@ async function check(){
     // No retries, no product feed, and no raw dealer prices in logs or responses.
     const data=await createChattanoogaClient().getItems({item_ids:'XISOR5101,ZOTHRD22',page:1,per_page:2});
     const portalComparison=compareCssiPortalReferences(data,[
-      {label:'romeo5',cssi_id:'XISOR5101',portalCostCents:11388,portalMapCents:null,portalInventory:32},
-      {label:'zerotech',cssi_id:'ZOTHRD22',portalCostCents:9599,portalMapCents:14900,portalInventory:9}
+      {label:'romeo5',cssi_id:'XISOR5101',portalCostCents:11388,portalPreviousCents:11999,portalMapCents:null,portalInventory:32},
+      {label:'zerotech',cssi_id:'ZOTHRD22',portalCostCents:9599,portalPreviousCents:9719,portalMapCents:14900,portalInventory:9}
     ]);
     const rootKeys=Object.keys(data||{}).slice(0,20);
     const responseShape=summarizeCssiProbeResponse(data);
