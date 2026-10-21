@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { createChattanoogaClient } from './chattanooga_client.js';
-import { retailPriceCents } from './chattanooga_pricing.js';
+import { retailPriceCents, parseSupplierMoneyCents } from './chattanooga_pricing.js';
 
 // All routes MUST be mounted behind the application's existing auth and manager role middleware.
 export function createChattanoogaRouter(pool) {
@@ -10,19 +10,20 @@ export function createChattanoogaRouter(pool) {
   const client=()=>createChattanoogaClient();
   const bounded=(v,def,max)=>Number.isInteger(Number(v))&&Number(v)>0?Math.min(Number(v),max):def;
   const text=(v,n=255)=>String(v??'').trim().slice(0,n);
-  const money=(v)=>{const n=Number(v);return Number.isFinite(n)&&n>=0?Math.round(n*100):0;};
+  const money=(v)=>parseSupplierMoneyCents(v);
   const list=(body)=>Array.isArray(body)?body:(Array.isArray(body?.items)?body.items:Array.isArray(body?.product_feed)?body.product_feed:Array.isArray(body?.data)?body.data:[]);
   const normalize=(x)=>{
     const id=text(x.cssi_id??x.item_id??x.itemId??x.id??x.sku,120);
     const title=text(x.name??x.title??x.description,180);
     if(!id||!title) return null;
     const rawCost=x.drop_ship_price??x.cost??x.dealer_price??x.wholesale_price??x.unit_cost;
-    if(rawCost===undefined||rawCost===null||!Number.isFinite(Number(rawCost))||Number(rawCost)<0)return null;
-    return {id,title,category:text(x.category_name??x.category??x.product_category??'Uncategorized',80)||'Uncategorized',
+    if(rawCost===undefined||rawCost===null)return null;
+    let costCents;try{costCents=money(rawCost);}catch{return null;}
+    return {id,title,category:text(x.category_name??x.category??x.product_category??x.department_name??x.department??'Uncategorized',80)||'Uncategorized',
       brand:text(x.manufacturer??x.brand,120),sku:text(x.sku??x.cssi_id??x.item_id??id,80),upc:text(x.upc??x.upc_code,80),
       description:text(x.long_description??x.product_description??x.description??'',4000),
-      image_url:text(x.image_url??x.image??'',1000),
-      cost_cents:money(rawCost),quantity:Math.max(0,Math.floor(Number(x.inventory??x.quantity_available??x.available_quantity??x.quantity??x.qty??0)||0)),raw:x};
+      image_url:text(x.image_url??x.image??x.primary_image_url??'',1000),
+      cost_cents:costCents,quantity:Math.max(0,Math.floor(Number(x.inventory??x.quantity_available??x.available_quantity??x.quantity??x.qty??0)||0)),raw:x};
   };
   router.get('/health',(_req,res)=>res.json({configured:!!(process.env.CHATTANOOGA_SID&&process.env.CHATTANOOGA_TOKEN),version:'v6',default_markup:20,ordering_enabled:false}));
   router.get('/remote',async(req,res)=>{try{
