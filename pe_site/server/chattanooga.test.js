@@ -202,7 +202,7 @@ test('official V6 product-feed parameter contract rejects undocumented paginatio
   assert.throws(()=>validateProductFeedParams({per_page:1}),RangeError);
   assert.throws(()=>validateProductFeedParams({unknown:'value'}),RangeError);
   assert.throws(()=>validateProductFeedParams(null),TypeError);
-  await assert.rejects(client.getProductFeed({page:1,per_page:1}),RangeError);
+  assert.throws(()=>client.getProductFeed({page:1,per_page:1}),RangeError);
   assert.equal(requests,0);
   const allowed=validateProductFeedParams({manufacturer_ids:'AA',primary_image_only_flag:1});
   assert.equal(allowed.manufacturer_ids,'AA');
