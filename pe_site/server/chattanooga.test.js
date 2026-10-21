@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createChattanoogaClient, validateProductFeedParams, validateItemsParams } from './chattanooga_client.js';
-import { inspectCassiItem, summarizeCssiReadiness, classifyCssiMapFormat, summarizeCssiProbeResponse } from './chattanooga_inspect.js';
+import { inspectCassiItem, summarizeCssiReadiness, classifyCssiMapFormat, summarizeCssiProbeResponse, compareCssiPortalReferences } from './chattanooga_inspect.js';
 import { retailPriceCents, normalizeCatalogStatus, parseSupplierMoneyCents, evaluateMapPrice } from './chattanooga_pricing.js';
 
 test('default 20 percent markup and override', () => {
@@ -233,4 +233,44 @@ test('invalid item query is rejected locally before contacting supplier',()=>{
   assert.throws(()=>client.getItems({per_page:100}),RangeError);
   assert.throws(()=>client.getItems({page:-1}),RangeError);
   assert.equal(requests,0);
+});
+
+test('read-only portal comparison matches exact item IDs and reveals no supplier values',()=>{
+  const refs=[
+    {label:'romeo5',cssi_id:'XISOR5101',portalCostCents:11388,portalMapCents:null,portalInventory:32},
+    {label:'zerotech',cssi_id:'ZOTHRD22',portalCostCents:9599,portalMapCents:14900,portalInventory:9}
+  ];
+  const data={items:[
+    {cssi_id:'XISOR5101',name:'Secret Romeo Name',custom_price:113.88,retail_price:200,inventory:32,map_price:'',retail_map_price:''},
+    {cssi_id:'ZOTHRD22',name:'Secret ZeroTech Name',custom_price:95.99,retail_price:160,inventory:9,map_price:'',retail_map_price:'149.00'}
+  ]};
+  const result=compareCssiPortalReferences(data,refs);
+  assert.equal(result.romeo5.item_found,true);
+  assert.equal(result.romeo5.custom_price_vs_portal,'match');
+  assert.equal(result.romeo5.retail_price_vs_portal,'different');
+  assert.equal(result.romeo5.map_price_vs_portal,'not_applicable');
+  assert.equal(result.romeo5.map_price_missing,true);
+  assert.equal(result.zerotech.item_found,true);
+  assert.equal(result.zerotech.custom_price_vs_portal,'match');
+  assert.equal(result.zerotech.retail_map_price_vs_portal,'match');
+  assert.equal(result.zerotech.map_price_vs_portal,'missing_or_invalid');
+  assert.equal(result.zerotech.inventory_matches_portal,true);
+  assert.equal(result.zerotech.safe_to_import,false);
+  assert.ok(Object.isFrozen(result));
+  const output=JSON.stringify(result);
+  for(const value of ['113.88','95.99','149.00','Secret Romeo Name','Secret ZeroTech Name','XISOR5101','ZOTHRD22']){
+    assert.ok(!output.includes(value));
+  }
+});
+test('portal comparison fails closed on absent, stale or malformed API records',()=>{
+  const refs=[{label:'optic',cssi_id:'ABC',portalCostCents:5000,portalMapCents:9000,portalInventory:4}];
+  const missing=compareCssiPortalReferences({items:[]},refs).optic;
+  assert.equal(missing.item_found,false);
+  assert.equal(missing.custom_price_vs_portal,'not_found');
+  assert.equal(missing.inventory_matches_portal,false);
+  const different=compareCssiPortalReferences({items:[{cssi_id:'ABC',custom_price:51.12,retail_map_price:'90.00',inventory:3}]},refs).optic;
+  assert.equal(different.custom_price_vs_portal,'different');
+  assert.equal(different.retail_map_price_vs_portal,'match');
+  assert.equal(different.inventory_matches_portal,false);
+  assert.throws(()=>compareCssiPortalReferences({items:[]},[]),TypeError);
 });
