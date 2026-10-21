@@ -51,3 +51,21 @@ export function summarizeCssiReadiness(item) {
     safe_to_import: x.safe_to_import
   });
 }
+
+/**
+ * Diagnose a MAP field's representation without returning its actual value.
+ * Classification does not imply MAP applicability or authorize import.
+ */
+export function classifyCssiMapFormat(value) {
+  if (value === undefined || value === null) return 'absent';
+  if (typeof value === 'number') return Number.isFinite(value) ? 'numeric_type' : 'nonfinite_number';
+  if (typeof value !== 'string') return 'other_type';
+  const s = value.trim();
+  if (!s) return 'blank';
+  if (s === '-') return 'dash';
+  if (/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(s)) return 'plain_money';
+  if (/^(?:0|[1-9]\d*)\.\d{3,}$/.test(s)) return 'extra_decimal_places';
+  if (/^\$/.test(s)) return 'currency_symbol';
+  if (/^[-+]\d/.test(s)) return 'signed_number';
+  return 'other_string';
+}
