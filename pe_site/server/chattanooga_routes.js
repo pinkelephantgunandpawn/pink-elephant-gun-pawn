@@ -11,12 +11,12 @@ export function createChattanoogaRouter(pool) {
   const bounded=(v,def,max)=>Number.isInteger(Number(v))&&Number(v)>0?Math.min(Number(v),max):def;
   const text=(v,n=255)=>String(v??'').trim().slice(0,n);
   const money=(v)=>{const n=Number(v);return Number.isFinite(n)&&n>=0?Math.round(n*100):0;};
-  const list=(body)=>Array.isArray(body)?body:(Array.isArray(body?.items)?body.items:Array.isArray(body?.product_feed)?body.product_feed:[]);
+  const list=(body)=>Array.isArray(body)?body:(Array.isArray(body?.items)?body.items:Array.isArray(body?.product_feed)?body.product_feed:Array.isArray(body?.data)?body.data:[]);
   const normalize=(x)=>{
     const id=text(x.item_id??x.itemId??x.id??x.sku,120);
     const title=text(x.description??x.name??x.title,180);
     if(!id||!title) return null;
-    const rawCost=x.cost??x.price??x.dealer_price??x.wholesale_price;
+    const rawCost=x.cost??x.dealer_price??x.wholesale_price??x.unit_cost;
     if(rawCost===undefined||rawCost===null||!Number.isFinite(Number(rawCost))||Number(rawCost)<0)return null;
     return {id,title,category:text(x.category_name??x.category??x.product_category??'Uncategorized',80)||'Uncategorized',
       brand:text(x.manufacturer??x.brand,120),sku:text(x.sku??x.item_id??id,80),upc:text(x.upc??x.upc_code,80),
@@ -85,6 +85,36 @@ export function createChattanoogaRouter(pool) {
       await db.query("UPDATE distributor_catalog SET status='published',updated_at=now() WHERE id=$1",[x.id]);
       await db.query('COMMIT');res.json({published:true});
     }catch(e){await db.query('ROLLBACK');if(e.code==='23505')return res.status(409).json({error:'SKU already exists'});fail(res,e);}finally{db.release();}
+  });
+  // Manual refresh for staged SKUs only. No supplier ordering and no automatic publishing.
+  router.post('/sync',async(_req,res)=>{
+    try{
+      const {rows}=await pool.query("SELECT supplier_item_id FROM distributor_catalog WHERE supplier='chattanooga' ORDER BY updated_at DESC LIMIT 100");
+      if(!rows.length)return res.json({updated:0,skipped:0});
+      let updated=0,skipped=0;
+      for(const item of rows){
+        try{
+          const result=await client().getItems({item_ids:item.supplier_item_id});
+          const x=list(result).map(normalize).find(x=>x?.id===item.supplier_item_id);
+          if(!x){skipped++;continue;}
+          const db=await pool.connect();
+          try{await db.query('BEGIN');
+            const r=await db.query("SELECT * FROM distributor_catalog WHERE supplier='chattanooga' AND supplier_item_id=$1 FOR UPDATE",[item.supplier_item_id]);
+            const p=r.rows[0];
+            if(p){
+              await db.query('UPDATE distributor_catalog SET cost_cents=$2,available_quantity=$3,last_synced_at=now(),updated_at=now() WHERE id=$1',[p.id,x.cost_cents,x.quantity]);
+              if(p.status==='published'&&p.inventory_id){
+                const price=retailPriceCents(x.cost_cents,Number(p.markup_percent),p.price_override_cents);
+                await db.query('UPDATE inventory SET cost_cents=$2,price_cents=$3,quantity=$4,updated_at=now() WHERE id=$1',[p.inventory_id,x.cost_cents,price,x.quantity]);
+              }
+              updated++;
+            }
+            await db.query('COMMIT');
+          }catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}
+        }catch(e){skipped++;console.error('Chattanooga item sync failed:',item.supplier_item_id,e?.message);}
+      }
+      res.json({updated,skipped,limit:100});
+    }catch(e){fail(res,e);}
   });
   router.post('/products/:id/hide',async(req,res)=>{
     const db=await pool.connect();try{await db.query('BEGIN');
