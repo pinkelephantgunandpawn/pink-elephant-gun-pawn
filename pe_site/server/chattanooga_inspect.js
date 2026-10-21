@@ -5,7 +5,7 @@ export function inspectCassiItem(item) {
   const id = typeof item.cssi_id === 'string' && item.cssi_id.trim() ? item.cssi_id.trim() : null;
   const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim() : null;
   const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
-  const moneyString = (value) => typeof value === 'string' && /^(?:0|[1-9]\\d*)(?:\\.\\d{1,2})?$/.test(value.trim()) ? value.trim() : null;
+  const moneyString = (value) => typeof value === 'string' && /^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(value.trim()) ? value.trim() : null;
   const inventory = Number.isSafeInteger(item.inventory) && item.inventory >= 0 ? item.inventory : null;
   return Object.freeze({
     cssi_id: id,
