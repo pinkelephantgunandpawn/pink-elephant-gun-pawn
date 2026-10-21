@@ -20,6 +20,36 @@ export function validateProductFeedParams(params = {}) {
   return params;
 }
 
+
+const ITEM_QUERY_KEYS = new Set([
+  'item_ids','upc_codes','manufacturer_ids','serialized_flag',
+  'qas_last_updated_after','return_custom_properties','page','per_page'
+]);
+/** Validate documented read-only item query limits before sending any request. */
+export function validateItemsParams(params = {}) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) throw new TypeError('Invalid item parameters');
+  for (const [key,value] of Object.entries(params)) {
+    if (!ITEM_QUERY_KEYS.has(key)) throw new RangeError('Undocumented item parameter');
+    if (value === undefined || value === null || value === '') continue;
+    if (key === 'page' || key === 'per_page') {
+      const number = Number(value);
+      if (!Number.isSafeInteger(number) || number < 1 || (key === 'per_page' && number > 50)) {
+        throw new RangeError('Invalid item pagination');
+      }
+    }
+    if (key === 'item_ids' || key === 'upc_codes' || key === 'manufacturer_ids') {
+      if (typeof value !== 'string') throw new TypeError('Expected comma-separated item filter');
+      const parts = value.split(',').map(x => x.trim());
+      const max = key === 'manufacturer_ids' ? 10 : 50;
+      const maxLength = key === 'item_ids' ? 24 : key === 'upc_codes' ? 13 : 80;
+      if (parts.length > max || parts.some(x => !x || x.length > maxLength)) {
+        throw new RangeError('Invalid item filter');
+      }
+    }
+  }
+  return params;
+}
+
 export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, token = process.env.CHATTANOOGA_TOKEN, fetchImpl = globalThis.fetch } = {}) {
   if (!sid || !token) throw new Error('Chattanooga credentials are not configured');
   if (typeof fetchImpl !== 'function') throw new Error('fetch is required');
@@ -47,7 +77,7 @@ export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, tok
     return body;
   }
   return Object.freeze({
-    getItems: params => get('items', params),
+    getItems: params => get('items', validateItemsParams(params)),
     getProductFeed: params => get('items/product-feed', validateProductFeedParams(params)),
     getItemProperties: params => get('item-properties', params)
   });
