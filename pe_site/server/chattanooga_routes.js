@@ -44,9 +44,9 @@ export function createChattanoogaRouter(pool) {
     res.json(rows.map(x=>({...x,retail_price_cents:retailPriceCents(x.cost_cents,Number(x.markup_percent),x.price_override_cents)})));
   }catch(e){fail(res,e);}});
   router.post('/stage',async(req,res)=>{const raw=Array.isArray(req.body?.items)?req.body.items:[];
-    if(!raw.length||raw.length>100)return res.status(400).json({error:'Select 1–100 products'});
+    if(!raw.length||raw.length>10)return res.status(400).json({error:'Select 1–10 products per batch'});
     // Never trust client-submitted wholesale cost, availability or metadata.
-    const requestedIds=raw.map(x=>text(x.item_id??x.itemId??x.id??x.sku,120));
+    const requestedIds=raw.map(x=>text(x.cssi_id??x.item_id??x.itemId??x.id??x.sku,120));
     if(requestedIds.some(x=>!x)||new Set(requestedIds).size!==requestedIds.length)return res.status(400).json({error:'Invalid or duplicate supplier IDs'});
     const normalized=[];
     try {
