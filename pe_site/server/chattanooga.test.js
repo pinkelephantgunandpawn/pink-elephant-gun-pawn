@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createChattanoogaClient } from './chattanooga_client.js';
-import { retailPriceCents, normalizeCatalogStatus } from './chattanooga_pricing.js';
+import { retailPriceCents, normalizeCatalogStatus, parseSupplierMoneyCents, evaluateMapPrice } from './chattanooga_pricing.js';
 
 test('default 20 percent markup and override', () => {
   assert.equal(retailPriceCents(50000),60000);
@@ -26,4 +26,16 @@ test('read-only client sends documented auth and does not expose secrets', async
 test('API error does not leak credentials', async () => {
   const client=createChattanoogaClient({sid:'s',token:'secret',fetchImpl:async()=>({ok:false,status:401,json:async()=>({error_code:4001})})});
   await assert.rejects(client.getItems(),err=>err.code===4001 && !err.message.includes('secret'));
+});
+
+test('supplier MAP string parsing and reference optic price',()=>{
+  assert.equal(parseSupplierMoneyCents('189.00'),18900);
+  assert.equal(parseSupplierMoneyCents(139.99),13999);
+  assert.equal(parseSupplierMoneyCents('0'),0);
+  for(const bad of ['',null,'N/A','-1','$189.00','189.001',Infinity]) assert.throws(()=>parseSupplierMoneyCents(bad));
+  const result=evaluateMapPrice({costCents:13999,mapCents:parseSupplierMoneyCents('189.00')});
+  assert.deepEqual(result,{proposedCents:16799,mapCents:18900,suggestedCents:18900,belowMap:true});
+  const override=evaluateMapPrice({costCents:13999,mapCents:18900,overrideCents:20000});
+  assert.equal(override.belowMap,false);
+  assert.equal(override.suggestedCents,20000);
 });
