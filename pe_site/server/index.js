@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { createChattanoogaRouter } from './chattanooga_routes.js';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -38,6 +39,7 @@ const __dirname = path.dirname(__filename);
 async function ensureSchema(){
   const schema=await fs.readFile(path.join(__dirname,'schema.sql'),'utf8');
   await pool.query(schema);
+  await pool.query(await fs.readFile(path.join(__dirname,'chattanooga_catalog.sql'),'utf8'));
   // Repair older inventory rows that were categorized as regulated but accidentally saved with regulated=false.
   await pool.query(`UPDATE inventory SET regulated=true,updated_at=now() WHERE regulated=false AND lower(category) IN ('firearms','firearm','guns','gun','handguns','handgun','rifles','rifle','shotguns','shotgun','ammunition','ammo')`);
   // One optional timed homepage feature. No inventory prices or orders are modified.
@@ -1602,6 +1604,7 @@ app.get('/api/reports/year-end',auth,requireRole('manager'),async(req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:'Could not build year-end report'})}
 });
 
+app.use('/api/admin/chattanooga',auth,requireRole('manager'),createChattanoogaRouter(pool));
 app.get('/api/audit',auth,requireRole('admin'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,user_id,action,entity_type,entity_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 500');res.json(rows);});
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).json({error:'Internal server error'});});
 ensureSchema().then(()=>ensureBootstrapAdmin()).then(()=>app.listen(port,'0.0.0.0',()=>{console.log(`Pink Elephant API listening on ${port}`);if(r2Config())setTimeout(()=>migrateImagesToR2().then(r=>console.log('R2 image migration complete',r)).catch(e=>console.error('R2 image migration failed',e)),1500)})).catch(err=>{console.error(err);process.exit(1)});
