@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createChattanoogaClient } from './chattanooga_client.js';
-import { inspectCassiItem, summarizeCssiReadiness } from './chattanooga_inspect.js';
+import { inspectCassiItem, summarizeCssiReadiness, classifyCssiMapFormat } from './chattanooga_inspect.js';
 import { retailPriceCents, normalizeCatalogStatus, parseSupplierMoneyCents, evaluateMapPrice } from './chattanooga_pricing.js';
 
 test('default 20 percent markup and override', () => {
@@ -143,4 +143,18 @@ test('ZeroTech portal example: 20 percent markup is below displayed retail MAP',
   assert.equal(inspected.retail_map_price,'149.00');
   assert.equal(inspected.retail_map_field_status,'present');
   assert.equal(inspected.safe_to_import,false);
+});
+
+test('read-only MAP format classifier reports shapes, never prices',()=>{
+  const samples=[
+    [undefined,'absent'],[null,'absent'],['','blank'],['  ','blank'],['-','dash'],
+    ['149.00','plain_money'],['0','plain_money'],['0.0000','extra_decimal_places'],
+    ['$149.00','currency_symbol'],['-149.00','signed_number'],[149,'numeric_type'],
+    [Infinity,'nonfinite_number'],[{},'other_type'],['N/A','other_string']
+  ];
+  for(const [value,expected] of samples) {
+    const shape=classifyCssiMapFormat(value);
+    assert.equal(shape,expected);
+    assert.ok(!shape.includes('149'));
+  }
 });
