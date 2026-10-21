@@ -10,9 +10,11 @@ async function check(){
     const rootKeys=Object.keys(data||{}).slice(0,20);
     const records=Array.isArray(data)?data:(Array.isArray(data?.items)?data.items:Array.isArray(data?.data)?data.data:[]);
     const itemKeys=records.length?Object.keys(records[0]).slice(0,50):[];
+    const fieldTypes=records.length?Object.fromEntries(Object.entries(records[0]).map(([k,v])=>[k,Array.isArray(v)?'array':v===null?'null':typeof v])):{};
+    const nestedKeys=records.length?Object.fromEntries(Object.entries(records[0]).filter(([k,v])=>v&&typeof v==='object'&&!Array.isArray(v)).map(([k,v])=>[k,Object.keys(v).slice(0,30)])):{};
     // Output only field names, never prices, supplier IDs, or tokens.
-    console.log('Chattanooga read-only probe OK',JSON.stringify({rootKeys,itemKeys}));
-    state={status:'connected',checked_at:new Date().toISOString(),rootKeys,itemKeys};
+    console.log('Chattanooga read-only probe OK',JSON.stringify({rootKeys,itemKeys,fieldTypes,nestedKeys}));
+    state={status:'connected',checked_at:new Date().toISOString(),rootKeys,itemKeys,fieldTypes,nestedKeys};
   }catch(e){
     console.error('Chattanooga read-only probe failed',e?.status||'request_error',e?.code||'');
     state={status:'connection_failed',checked_at:new Date().toISOString()};
