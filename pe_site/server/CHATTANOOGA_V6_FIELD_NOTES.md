@@ -88,3 +88,22 @@ The dealer provided the text of the official V6 documentation. It confirms:
 The earlier product-feed test sent pagination parameters not documented for that endpoint. Those parameters are a possible reason for the 422 response, but the original error details were not retained, so the cause remains unconfirmed. The endpoint must not be automatically retried while rate limits are unresolved.
 
 The documentation does not explicitly define which account-specific API price matches the dealer portal's displayed purchase price. No pricing or publication automation is approved based on this reference alone.
+
+## Live account-specific cross-check: two exact dealer portal items (October 21, 2026)
+
+The isolated test service made **one** documented read-only request to `GET /items?item_ids=XISOR5101,ZOTHRD22&page=1&per_page=2`. Both requested items were returned. The probe compared values in memory to dealer-provided screenshots and logged **only match/different/missing results**, never API dealer prices or credentials.
+
+| V6 field | Romeo5 (`XISOR5101`) | ZeroTech (`ZOTHRD22`) |
+| --- | --- | --- |
+| `drop_ship_price` vs screenshot's **current Your Price** | **match** ($113.88) | **match** ($95.99) |
+| `custom_price` vs screenshot's **previous crossed-out price** | **match** ($119.99) | **match** ($97.19) |
+| `retail_price` vs screenshot's **previous crossed-out price** | **match** ($119.99) | **match** ($97.19) |
+| `retail_map_price` vs screenshot Retail MAP | blank, matching absent MAP | **match** ($149.00) |
+| `map_price` | blank | blank |
+| `inventory` vs screenshot stock | **match** (32) | **match** (9) |
+
+**Interpretation:** The field `drop_ship_price` matched the portal's current discounted "Your Price" on **both sampled products**, while `custom_price` and `retail_price` matched the crossed-out prior price. This is a significant empirical lead, not a guarantee that `drop_ship_price` is universally the appropriate dealer acquisition cost. The name suggests fulfillment-specific semantics; the portal could be reflecting a promotional price, and all price fields may change over time. We must not silently substitute `drop_ship_price` for all products, including non-drop-ship or allocated items, without a supplier explanation and a broader, authorized test.
+
+**Confirmed MAP candidate:** `retail_map_price` matched the ZeroTech portal's $149.00 Retail MAP, while the Romeo5 had no MAP on either side. The two examples do not establish MAP applicability to every manufacturer or sales channel.
+
+**Next safe step:** Continue using read-only comparisons; obtain supplier clarification about when `drop_ship_price` applies, whether `custom_price`/`retail_price` are undiscounted prices, and whether the promotional price is available for normal dealer orders. **Keep `price_meaning_verified:false` and `safe_to_import:false` until confirmed.** No inventory sync, publishing, ordering or checkout changes were made.
