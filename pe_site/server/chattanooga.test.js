@@ -113,3 +113,34 @@ test('isolated CSSI readiness summary exposes booleans, not supplier values',()=
   const json=JSON.stringify(summary);
   for(const sensitive of ['SECRET-ITEM-123','Private optic name','139.99','189.00']) assert.ok(!json.includes(sensitive));
 });
+
+test('dealer portal examples: missing MAP is different from malformed MAP',()=>{
+  // Synthetic API-shaped records based on portal displays, not captured API payloads.
+  const missing=inspectCassiItem({cssi_id:'example-romeo',name:'Example Romeo optic',inventory:32,custom_price:113.88,map_price:'-',retail_map_price:'-'});
+  assert.equal(missing.map_price,null);
+  assert.equal(missing.map_field_status,'missing');
+  assert.equal(missing.retail_map_field_status,'missing');
+  const summary=summarizeCssiReadiness({cssi_id:'example-romeo',name:'Example Romeo optic',inventory:32,map_price:'-',retail_map_price:'-'});
+  assert.equal(summary.map_field_missing,true);
+  assert.equal(summary.retail_map_field_missing,true);
+  assert.equal(summary.map_field_valid,false);
+  for(const value of [null,undefined,'','  ',' - ']){
+    assert.equal(inspectCassiItem({cssi_id:'1',name:'Optic',map_price:value}).map_field_status,'missing');
+  }
+  for(const value of ['N/A','$149.00','149.000','-149.00',149,{}]){
+    assert.equal(inspectCassiItem({cssi_id:'1',name:'Optic',map_price:value}).map_field_status,'invalid');
+  }
+});
+test('ZeroTech portal example: 20 percent markup is below displayed retail MAP',()=>{
+  // Portal screenshot: cost $95.99, retail MAP $149.00. No assumption that API custom_price is dealer cost.
+  const proposed=retailPriceCents(9599,20);
+  assert.equal(proposed,11519);
+  const result=evaluateMapPrice({costCents:9599,mapCents:parseSupplierMoneyCents('149.00')});
+  assert.equal(result.proposedCents,11519);
+  assert.equal(result.suggestedCents,14900);
+  assert.equal(result.belowMap,true);
+  const inspected=inspectCassiItem({cssi_id:'example-zerotech',name:'ZeroTech Thrive optic',inventory:9,retail_map_price:'149.00'});
+  assert.equal(inspected.retail_map_price,'149.00');
+  assert.equal(inspected.retail_map_field_status,'present');
+  assert.equal(inspected.safe_to_import,false);
+});
