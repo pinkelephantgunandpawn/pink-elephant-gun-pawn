@@ -26,3 +26,6 @@ CREATE TABLE IF NOT EXISTS distributor_catalog (
 CREATE INDEX IF NOT EXISTS distributor_catalog_category_status_idx ON distributor_catalog(category,status);
 CREATE INDEX IF NOT EXISTS distributor_catalog_supplier_sku_idx ON distributor_catalog(supplier,sku);
 -- Retail price is rounded to nearest cent. Manual override takes priority.
+
+ALTER TABLE distributor_catalog ADD COLUMN IF NOT EXISTS review_status text NOT NULL DEFAULT 'pending';
+ALTER TABLE distributor_catalog ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
