@@ -53,6 +53,15 @@ export function createChattanoogaRouter(pool) {
       map_cents:mapCents,cost_cents:costCents,quantity:Math.max(0,Math.floor(Number(x.inventory??x.quantity_available??x.available_quantity??x.quantity??x.qty??0)||0)),raw:x};
   };
   router.get('/health',(_req,res)=>res.json({configured:!!(process.env.CHATTANOOGA_SID&&process.env.CHATTANOOGA_TOKEN),version:'v6',default_markup:20,ordering_enabled:false}));
+  router.get('/field-diagnostics',async(_req,res)=>{try{
+    const data=await client().getItems({page:1,per_page:3});
+    const items=list(data);
+    const fields=[...new Set(items.flatMap(item=>Object.keys(item)))].sort();
+    const imageFields=fields.filter(key=>/image|photo|picture|media|thumbnail|asset/i.test(key));
+    const categoryFields=fields.filter(key=>/categor|department|group|type|class|subcategor/i.test(key));
+    res.set('Cache-Control','no-store');
+    res.json({sample_size:items.length,image_field_names:imageFields,category_field_names:categoryFields,eligible_count:items.map(normalize).filter(Boolean).length,notice:'Field names only; no credentials, supplier costs, or raw records exposed'});
+  }catch(e){res.status(502).json({error:'Unable to inspect supplier field names'});}});
   router.get('/remote',async(req,res)=>{try{
     const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,10,10);
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
