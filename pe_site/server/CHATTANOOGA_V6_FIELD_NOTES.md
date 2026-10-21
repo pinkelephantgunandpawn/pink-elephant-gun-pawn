@@ -42,3 +42,15 @@ Do not interpret a numeric supplier flag as a Boolean without confirming its all
 5. What request parameters are required for `/items/product-feed`, and what does supplier error 9000 indicate?
 
 **Release rule:** Keep the main branch and production deployment unchanged until pricing semantics, classification, inventory availability, authorization, and business approval are verified.
+
+## Dealer portal visual cross-checks (October 21, 2026)
+These values are from dealer portal screenshots, **not** direct API responses. Do not assume any one API field maps to a portal label without matching the same product.
+
+| Portal product | Item number | UPC | Dealer portal price | Retail MAP | Portal stock |
+| --- | --- | --- | --- | --- | --- |
+| Sig Sauer Romeo5 Gen II Compact Red Dot | `XISOR5101` | `798681694600` | $113.88 sale ($119.99 struck through) | dash / not provided | 32 |
+| ZeroTech Thrive HD Digital Red Dot 1x22 2 MOA | `ZOTHRD22` | `9334046004687` | $95.99 sale ($97.19 struck through) | $149.00 | 9 |
+
+A 20% markup on $95.99 is $115.19, below the portal's displayed $149.00 Retail MAP. The read-only `evaluateMapPrice` helper suggests $149.00 in that example; do not apply this to storefront pricing until MAP semantics and API cost mapping are confirmed.
+
+The read-only inspector now distinguishes a missing MAP value (null, absent, empty, or dash) from an invalid/unrecognized MAP value. The live probe previously saw unrecognized MAP formats in its first sample; this alone does not establish that MAP is absent. It is not yet known how the API encodes a portal dash.
