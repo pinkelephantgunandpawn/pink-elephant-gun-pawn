@@ -24,7 +24,7 @@ async function check(){
     const feed={status:'not_checked',reason:'supplier_endpoint_unverified'};
     // Output only field names, never prices, supplier IDs, or tokens.
     console.log('Chattanooga read-only probe OK',JSON.stringify({rootKeys,itemKeys,fieldTypes,nestedKeys,responseShape,fieldReadiness,mapFormats,feed}));
-    state={status:'connected',checked_at:new Date().toISOString(),rootKeys,itemKeys,fieldTypes,nestedKeys,fieldReadiness,feed};
+    state={status:'connected',checked_at:new Date().toISOString(),rootKeys,itemKeys,fieldTypes,nestedKeys,responseShape,fieldReadiness,mapFormats,feed};
   }catch(e){
     console.error('Chattanooga read-only probe failed',e?.status||'request_error',e?.code||'');
     state={status:'connection_failed',checked_at:new Date().toISOString()};
