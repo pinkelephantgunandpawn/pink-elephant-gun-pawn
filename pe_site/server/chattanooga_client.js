@@ -5,6 +5,21 @@ const BASE_URL = 'https://api.chattanoogashooting.com/rest/v6/';
 export class ChattanoogaApiError extends Error {
   constructor(message, status, code) { super(message); this.name = 'ChattanoogaApiError'; this.status = status; this.code = code; }
 }
+
+// Reject undocumented product-feed query keys locally. This is validation only;
+// it does not trigger a supplier request or enable scheduled downloads.
+const PRODUCT_FEED_KEYS = new Set([
+  'manufacturer_ids', 'optional_columns', 'custom_properties',
+  'return_custom_properties', 'primary_image_only_flag'
+]);
+export function validateProductFeedParams(params = {}) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) throw new TypeError('Invalid product-feed parameters');
+  for (const key of Object.keys(params)) {
+    if (!PRODUCT_FEED_KEYS.has(key)) throw new RangeError('Undocumented product-feed parameter');
+  }
+  return params;
+}
+
 export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, token = process.env.CHATTANOOGA_TOKEN, fetchImpl = globalThis.fetch } = {}) {
   if (!sid || !token) throw new Error('Chattanooga credentials are not configured');
   if (typeof fetchImpl !== 'function') throw new Error('fetch is required');
@@ -33,7 +48,7 @@ export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, tok
   }
   return Object.freeze({
     getItems: params => get('items', params),
-    getProductFeed: params => get('items/product-feed', params),
+    getProductFeed: params => get('items/product-feed', validateProductFeedParams(params)),
     getItemProperties: params => get('item-properties', params)
   });
 }
