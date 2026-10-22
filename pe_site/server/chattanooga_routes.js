@@ -86,6 +86,19 @@ export function createChattanoogaRouter(pool) {
       res.set('Cache-Control','no-store');res.json({...rows[0],published:false});
     }catch(e){res.status(502).json({error:'Supplier refresh failed; existing draft retained'});}
   });
+  // Preview current supplier availability for one staged item without changing its approval or storefront state.
+  router.get('/products/:id/availability',async(req,res)=>{
+    try{
+      const {rows}=await pool.query("SELECT supplier_item_id,category FROM distributor_catalog WHERE id=$1 AND supplier='chattanooga' AND status='draft'",[req.params.id]);
+      if(!rows.length)return res.status(404).json({error:'Draft not found'});
+      const supplierId=rows[0].supplier_item_id;
+      const data=await client().getItems({item_ids:supplierId});
+      const item=list(data).map(normalize).find(x=>x?.id===supplierId);
+      if(!item)return res.status(422).json({error:'Supplier availability not verifiable; do not promise stock'});
+      res.set('Cache-Control','no-store');
+      res.json({supplier_item_id:supplierId,reported_quantity:item.quantity,category:item.category,available_to_sell_verified:false,note:'Supplier quantity is informational, not a confirmed allocation or checkout reservation'});
+    }catch(e){res.status(502).json({error:'Unable to verify supplier stock'});}
+  });
   router.get('/categories',async(_req,res)=>{try{const {rows}=await pool.query("SELECT category,count(*)::int AS total,count(*) FILTER (WHERE status='draft')::int AS drafts,count(*) FILTER (WHERE status='published')::int AS published FROM distributor_catalog WHERE supplier='chattanooga' AND category IN ('Firearms','Optics') GROUP BY category ORDER BY category");res.json(rows);}catch(e){fail(res,e);}});
   router.get('/products',async(req,res)=>{try{
     const where=["supplier='chattanooga'"],values=[];
