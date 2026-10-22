@@ -294,7 +294,7 @@ export function createChattanoogaRouter(pool) {
   router.post('/sync',(_req,res)=>res.status(409).json({error:'Supplier inventory sync is disabled until catalog pricing and fulfillment are verified'}));
   router.post('/products/:id/hide',async(req,res)=>{
     const db=await pool.connect();try{await db.query('BEGIN');
-      const {rows}=await db.query('SELECT inventory_id FROM distributor_catalog WHERE id=$1 AND supplier='chattanooga' FOR UPDATE',[req.params.id]);
+      const {rows}=await db.query("SELECT inventory_id FROM distributor_catalog WHERE id=$1 AND supplier='chattanooga' FOR UPDATE",[req.params.id]);
       if(!rows.length){await db.query('ROLLBACK');return res.status(404).json({error:'Not found'});}
       if(rows[0].inventory_id)await db.query('UPDATE inventory SET public_visible=false,updated_at=now() WHERE id=$1',[rows[0].inventory_id]);
       await db.query("UPDATE distributor_catalog SET status='hidden',updated_at=now() WHERE id=$1 AND supplier='chattanooga'",[req.params.id]);
