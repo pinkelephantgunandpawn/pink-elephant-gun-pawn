@@ -249,7 +249,10 @@ export function createChattanoogaRouter(pool) {
   // signed image URLs, raw supplier records, or customer information.
   router.get('/review-export',async(req,res)=>{
     try{
-      const {rows}=await pool.query("SELECT supplier_item_id,sku,upc,title,category,brand,status,review_status,map_cents,image_url,available_quantity,last_synced_at FROM distributor_catalog WHERE supplier='chattanooga' AND status='draft' AND category IN ('Firearms','Optics') ORDER BY category,title LIMIT 20000");
+      const exportFilters=["supplier='chattanooga'","status='draft'","category IN ('Firearms','Optics')"];const params=[];
+      const review=typeof req.query.review==='string'?req.query.review:'';
+      if(review){if(!['pending','approved','rejected'].includes(review))return res.status(400).json({error:'Invalid review status'});params.push(review);exportFilters.push('review_status=$'+params.length);}
+      const {rows}=await pool.query("SELECT supplier_item_id,sku,upc,title,category,brand,status,review_status,map_cents,image_url,available_quantity,last_synced_at FROM distributor_catalog WHERE "+exportFilters.join(' AND ')+" ORDER BY category,title LIMIT 20000",params);
       if(rows.length>=20000){res.set('Cache-Control','no-store');return res.status(409).json({error:'Draft export exceeds the safe 20,000-row limit. Narrow the catalog before exporting; no partial file was generated.'});}
       const header=['Supplier ID','SKU','UPC','Title','Category','Brand','Review status','MAP provided','Photo URL present','Reported stock','Last refreshed'];
       const cell=v=>'"'+String(v??'').replace(/[\r\n]+/g,' ').replace(/^([=+@-])/,(m)=>"'"+m).replace(/"/g,'""')+'"';
