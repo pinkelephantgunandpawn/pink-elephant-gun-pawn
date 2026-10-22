@@ -10,6 +10,27 @@ export function createChattanoogaRouter(pool) {
   const allowed=['draft','published','hidden'];
   const fail=(res,e)=>{console.error('Chattanooga admin request:',e?.message);res.status(500).json({error:'Distributor operation failed'});};
   const client=()=>createChattanoogaClient();
+  // Read-only supplier lookup. Never infer eligibility from on-file status alone.
+  router.get('/ffl-status/:fflNumber',async(req,res)=>{
+    try{
+      const body=await client().getFflStatus(req.params.fflNumber);
+      const records=body?.federal_firearms_licenses;
+      if(!Array.isArray(records)||records.length!==1)return res.status(502).json({error:'Unexpected supplier FFL response'});
+      const record=records[0];
+      const onFile=record.on_file_flag===1||record.on_file_flag==='1';
+      const optedOut=record.drop_ship_opted_out_flag===1||record.drop_ship_opted_out_flag==='1';
+      const optOutKnown=[0,1,'0','1'].includes(record.drop_ship_opted_out_flag);
+      res.set('Cache-Control','no-store');
+      res.json({ffl_number:record.ffl_number,on_file:onFile,drop_ship_opted_out:optOutKnown?optedOut:null,
+        eligible_for_supplier_drop_ship:onFile&&optOutKnown&&!optedOut,
+        requires_manual_review:!onFile||!optOutKnown||optedOut,
+        source:'chattanooga_v6_read_only',checked_at:new Date().toISOString()});
+    }catch(e){
+      if(e instanceof TypeError||e instanceof RangeError)return res.status(400).json({error:'Invalid FFL number'});
+      fail(res,e);
+    }
+  });
+
   const bounded=(v,def,max)=>Number.isInteger(Number(v))&&Number(v)>0?Math.min(Number(v),max):def;
   const text=(v,n=255)=>String(v??'').trim().slice(0,n);
   const money=(v)=>parseSupplierMoneyCents(v);
