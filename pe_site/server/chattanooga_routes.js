@@ -258,6 +258,23 @@ export function createChattanoogaRouter(pool) {
       res.set('Cache-Control','no-store');res.set('Content-Type','text/csv; charset=utf-8');res.set('Content-Disposition','attachment; filename="chattanooga-draft-review.csv"');res.send('\uFEFF'+lines.join('\r\n')+'\r\n');
     }catch(e){fail(res,e);}
   });
+  // Read-only inventory-review counts, including rejected drafts and records
+  // that cannot yet be advertised. No supplier API requests are made.
+  router.get('/review-summary',async(_req,res)=>{
+    try{
+      const {rows}=await pool.query(`SELECT
+        count(*)::int AS draft_total,
+        count(*) FILTER (WHERE review_status='pending')::int AS pending,
+        count(*) FILTER (WHERE review_status='approved')::int AS approved,
+        count(*) FILTER (WHERE review_status='rejected')::int AS rejected,
+        count(*) FILTER (WHERE map_cents IS NULL OR map_cents<0)::int AS map_unverified,
+        count(*) FILTER (WHERE image_url IS NULL OR image_url='')::int AS missing_image,
+        count(*) FILTER (WHERE available_quantity IS NULL OR available_quantity<=0)::int AS no_reported_stock,
+        count(*) FILTER (WHERE last_synced_at IS NULL OR last_synced_at<now()-interval '24 hours')::int AS stale_over_24h
+        FROM distributor_catalog WHERE supplier='chattanooga' AND status='draft' AND category IN ('Firearms','Optics')`);
+      res.set('Cache-Control','no-store');res.json({...rows[0],note:'Local snapshot counts; freshness does not guarantee available or allocated supplier stock.'});
+    }catch(e){fail(res,e);}
+  });
   router.get('/categories',async(_req,res)=>{try{const {rows}=await pool.query("SELECT category,count(*)::int AS total,count(*) FILTER (WHERE status='draft')::int AS drafts,count(*) FILTER (WHERE status='published')::int AS published FROM distributor_catalog WHERE supplier='chattanooga' AND category IN ('Firearms','Optics') GROUP BY category ORDER BY category");res.json(rows);}catch(e){fail(res,e);}});
   router.get('/products',async(req,res)=>{try{
     const where=["supplier='chattanooga'"],values=[];
