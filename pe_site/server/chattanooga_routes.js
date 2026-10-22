@@ -249,7 +249,8 @@ export function createChattanoogaRouter(pool) {
       missing_image:"status='draft' AND (image_url IS NULL OR image_url='')",
       map_unverified:"status='draft' AND map_cents IS NULL",
       zero_stock:"status='draft' AND available_quantity=0",
-      approved:"status='draft' AND review_status='approved'"
+      approved:"status='draft' AND review_status='approved'",
+      rejected:"status='draft' AND review_status='rejected'"
     };
     if(attention && !Object.hasOwn(attentionFilters,attention))return res.status(400).json({error:'Invalid review filter'});
     if(attention)where.push('('+attentionFilters[attention]+')');
