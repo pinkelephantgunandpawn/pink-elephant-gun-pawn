@@ -416,7 +416,7 @@ export function createChattanoogaRouter(pool) {
     const totalRequested=new Map();
     for(let i=0;i<lines.length;i++)totalRequested.set(skus[i],(totalRequested.get(skus[i])||0)+lines[i].quantity);
     try{
-      const {rows}=await pool.query(`SELECT sku,category,status,review_status,map_cents,image_url,
+      const {rows}=await pool.query(`SELECT sku,category,status,review_status,map_cents,cost_cents,markup_percent,price_override_cents,image_url,
         available_quantity,last_synced_at FROM distributor_catalog
         WHERE supplier='chattanooga' AND sku=ANY($1::text[]) AND category IN ('Firearms','Optics')`,[skus]);
       const bySku=new Map();
@@ -441,6 +441,11 @@ export function createChattanoogaRouter(pool) {
           if(x.status!=='draft')issues.push('Not an unpublished draft');
           if(x.review_status!=='approved')issues.push('Draft not approved for review');
           if(x.map_cents===null||x.map_cents<0)issues.push('MAP unverified');
+          if(!Number.isSafeInteger(Number(x.cost_cents))||Number(x.cost_cents)<=0)issues.push('Wholesale cost missing or invalid');
+          const pricing=draftAdvertisedPrice({costCents:x.cost_cents,mapCents:x.map_cents,
+            markupPercent:Number(x.markup_percent),overrideCents:x.price_override_cents});
+          if(!Number.isSafeInteger(pricing.advertisedCents)||pricing.advertisedCents<=0)issues.push('Advertised price missing or invalid');
+          if(pricing.belowMap)issues.push('Proposed advertised price below MAP');
           if(!x.image_url)issues.push('Image missing');
           if(x.available_quantity===null||x.available_quantity<totalRequested.get(sku))issues.push('Reported stock below combined requested quantity for this SKU');
           const timestamp=x.last_synced_at?new Date(x.last_synced_at).getTime():NaN;
