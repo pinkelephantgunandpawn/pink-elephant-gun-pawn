@@ -399,6 +399,46 @@ export function createChattanoogaRouter(pool) {
         note:'Local snapshot only. Passing checks does not authorize listing, checkout or supplier order.'});
     }catch(e){fail(res,e);}
   });
+  // Bulk local catalog reconciliation for prospective order lines. Never a live stock check.
+  router.post('/order-catalog-check',async(req,res)=>{
+    const lines=req.body?.items;
+    if(!Array.isArray(lines)||lines.length<1||lines.length>20)return res.status(400).json({error:'Provide 1 to 20 proposed SKU lines'});
+    const skus=[];
+    for(const [i,line] of lines.entries()){
+      if(!line||typeof line.sku!=='string'||!line.sku.trim()||line.sku.length>80||
+        !Number.isInteger(line.quantity)||line.quantity<1||line.quantity>100)
+        return res.status(400).json({error:'Line '+(i+1)+' needs a supplier SKU and quantity 1–100'});
+      skus.push(line.sku.trim());
+    }
+    try{
+      const {rows}=await pool.query(`SELECT sku,category,status,review_status,map_cents,image_url,
+        available_quantity,last_synced_at FROM distributor_catalog
+        WHERE supplier='chattanooga' AND sku=ANY($1::text[]) AND category IN ('Firearms','Optics')`,[skus]);
+      const bySku=new Map();
+      for(const x of rows){const a=bySku.get(x.sku)||[];a.push(x);bySku.set(x.sku,a);}
+      const results=lines.map((line,i)=>{
+        const sku=skus[i],matches=bySku.get(sku)||[],issues=[];
+        if(matches.length===0)issues.push('Not found in local staged catalog');
+        if(matches.length>1)issues.push('Duplicate local SKU');
+        if(matches.length===1){
+          const x=matches[0];
+          if(x.status!=='draft')issues.push('Not an unpublished draft');
+          if(x.review_status!=='approved')issues.push('Draft not approved for review');
+          if(x.map_cents===null||x.map_cents<0)issues.push('MAP unverified');
+          if(!x.image_url)issues.push('Image missing');
+          if(x.available_quantity===null||x.available_quantity<line.quantity)issues.push('Reported stock below requested quantity');
+          const timestamp=x.last_synced_at?new Date(x.last_synced_at).getTime():NaN;
+          if(!Number.isFinite(timestamp)||Date.now()-timestamp>86400000||timestamp>Date.now()+300000)issues.push('Inventory snapshot stale or invalid');
+        }
+        return {line:i+1,sku,quantity:line.quantity,category:matches.length===1?matches[0].category:null,
+          local_data_complete:issues.length===0,issues,live_allocation_verified:false};
+      });
+      res.set('Cache-Control','no-store');
+      res.json({results,all_local_data_complete:results.every(x=>x.local_data_complete),
+        supplier_order_created:false,order_submission_enabled:false,
+        warning:'Local inventory snapshots cannot confirm current availability or reserved stock. Do not use as an order approval.'});
+    }catch(e){fail(res,e);}
+  });
   // No live ordering: give managers a private, local-only checklist of
   // drafts that pass basic data checks. This is NOT a launch authorization.
   router.get('/candidate-summary',async(_req,res)=>{
