@@ -410,6 +410,8 @@ export function createChattanoogaRouter(pool) {
         return res.status(400).json({error:'Line '+(i+1)+' needs a supplier SKU and quantity 1–100'});
       skus.push(line.sku.trim());
     }
+    const totalRequested=new Map();
+    for(let i=0;i<lines.length;i++)totalRequested.set(skus[i],(totalRequested.get(skus[i])||0)+lines[i].quantity);
     try{
       const {rows}=await pool.query(`SELECT sku,category,status,review_status,map_cents,image_url,
         available_quantity,last_synced_at FROM distributor_catalog
@@ -426,7 +428,7 @@ export function createChattanoogaRouter(pool) {
           if(x.review_status!=='approved')issues.push('Draft not approved for review');
           if(x.map_cents===null||x.map_cents<0)issues.push('MAP unverified');
           if(!x.image_url)issues.push('Image missing');
-          if(x.available_quantity===null||x.available_quantity<line.quantity)issues.push('Reported stock below requested quantity');
+          if(x.available_quantity===null||x.available_quantity<totalRequested.get(sku))issues.push('Reported stock below combined requested quantity for this SKU');
           const timestamp=x.last_synced_at?new Date(x.last_synced_at).getTime():NaN;
           if(!Number.isFinite(timestamp)||Date.now()-timestamp>86400000||timestamp>Date.now()+300000)issues.push('Inventory snapshot stale or invalid');
         }
