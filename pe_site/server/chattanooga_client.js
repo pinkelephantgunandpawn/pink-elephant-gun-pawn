@@ -106,6 +106,8 @@ export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, tok
     if (!response.ok || body?.error_code) {
       throw new ChattanoogaApiError('Chattanooga API request failed', response.status, body?.error_code);
     }
+    if (!body || typeof body !== 'object' || Array.isArray(body))
+      throw new ChattanoogaApiError('Unexpected supplier JSON structure', 502);
     return body;
   }
   return Object.freeze({
