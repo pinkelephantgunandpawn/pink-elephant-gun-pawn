@@ -95,6 +95,9 @@ export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, tok
     let response;
     try {
       response = await fetchImpl(url, { method:'GET', headers:{ Authorization:authorization, Accept:'application/json' }, signal:controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) throw new ChattanoogaApiError('Supplier request timed out', 504);
+      throw new ChattanoogaApiError('Supplier request could not be completed', 502);
     } finally { clearTimeout(timer); }
     let body;
     try { body = await response.json(); } catch { throw new ChattanoogaApiError('Invalid JSON from Chattanooga', response.status); }
