@@ -224,6 +224,27 @@ export function createChattanoogaRouter(pool) {
       res.json({...rows[0],supplier_orders_enabled:false,automatic_publishing_enabled:false,stock_allocation_verified:false,ffl_fulfillment_verified:false,note:'Local draft snapshot only. Missing MAP does not necessarily mean no manufacturer MAP; allocation is not verified.'});
     }catch(e){fail(res,e);}
   });
+  // Internal fulfillment readiness checklist. Dealer activation is confirmed
+  // by sales correspondence, but no live supplier ordering is authorized here.
+  router.get('/fulfillment-readiness',(_req,res)=>{
+    res.set('Cache-Control','no-store');
+    res.json({
+      dealer_dropship_activation:'confirmed_by_sales_email_2026_10_21',
+      api_credentials:'reported_issued_not_returned',
+      supplier_order_submission:'disabled',
+      supplier_product_publication:'disabled',
+      customer_supplier_checkout:'disabled',
+      fulfillment_requirements:{
+        secure_feed_download:'awaiting_https_confirmation',
+        firearm_receiving_ffl_validation:'awaiting_written_procedure',
+        firearm_shipping_rules:'awaiting_written_procedure',
+        dropship_fees_and_restrictions:'awaiting_written_confirmation',
+        api_order_testing:'awaiting_coordinated_test_plan',
+        allocated_inventory:'requires_supplier_verification'
+      },
+      note:'Dropship account activation alone does not authorize automatic firearm orders, customer checkout, or publication.'
+    });
+  });
   // Export only non-sensitive review metadata. Never include wholesale costs,
   // signed image URLs, raw supplier records, or customer information.
   router.get('/review-export',async(req,res)=>{
