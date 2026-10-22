@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { attachChattanoogaReferenceRoutes } from './chattanooga_reference.js';
-import { createChattanoogaClient } from './chattanooga_client.js';
+import { createChattanoogaClient, evaluateFflStatus } from './chattanooga_client.js';
 import { retailPriceCents, parseSupplierMoneyCents, draftAdvertisedPrice } from './chattanooga_pricing.js';
 
 // All routes MUST be mounted behind the application's existing auth and manager role middleware.
@@ -14,21 +14,9 @@ export function createChattanoogaRouter(pool) {
   router.get('/ffl-status/:fflNumber',async(req,res)=>{
     try{
       const body=await client().getFflStatus(req.params.fflNumber);
-      const records=body?.federal_firearms_licenses;
-      if(!Array.isArray(records)||records.length!==1)return res.status(502).json({error:'Unexpected supplier FFL response'});
-      const record=records[0];
-      const requested=req.params.fflNumber.replace(/-/g,'').toUpperCase();
-      if(typeof record?.ffl_number!=='string'||record.ffl_number.replace(/-/g,'').toUpperCase()!==requested)
-        return res.status(502).json({error:'Supplier FFL response does not match requested license'});
-      const onFileKnown=[0,1,'0','1'].includes(record.on_file_flag);
-      const onFile=record.on_file_flag===1||record.on_file_flag==='1';
-      const optedOut=record.drop_ship_opted_out_flag===1||record.drop_ship_opted_out_flag==='1';
-      const optOutKnown=[0,1,'0','1'].includes(record.drop_ship_opted_out_flag);
+      const result=evaluateFflStatus(body,req.params.fflNumber);
       res.set('Cache-Control','no-store');
-      res.json({ffl_number:requested,on_file:onFileKnown?onFile:null,drop_ship_opted_out:optOutKnown?optedOut:null,
-        eligible_for_supplier_drop_ship:onFileKnown&&onFile&&optOutKnown&&!optedOut,
-        requires_manual_review:!onFileKnown||!onFile||!optOutKnown||optedOut,
-        source:'chattanooga_v6_read_only',checked_at:new Date().toISOString()});
+      res.json({...result,source:'chattanooga_v6_read_only',checked_at:new Date().toISOString()});
     }catch(e){
       if(e instanceof TypeError||e instanceof RangeError)return res.status(400).json({error:'Invalid FFL number'});
       fail(res,e);
