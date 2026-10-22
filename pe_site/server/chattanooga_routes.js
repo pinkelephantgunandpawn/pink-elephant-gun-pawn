@@ -87,11 +87,17 @@ export function createChattanoogaRouter(pool) {
       if(typeof link!=='string')return res.status(502).json({error:'Supplier did not return a product-feed URL'});
       step='validating supplier CSV location';
       const u=new URL(link);
-      if(u.protocol!=='https:'||u.hostname!=='api.chattanoogashooting.com'||!/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(u.pathname)||u.username||u.password){
+      if(!['https:','http:'].includes(u.protocol)||u.hostname!=='api.chattanoogashooting.com'||!/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(u.pathname)||u.username||u.password){
         // Do not follow an unapproved URL. Expose only safe routing metadata,
         // never the full link, signed query, path identifiers, or credentials.
         res.set('Cache-Control','no-store');
         return res.status(502).json({error:'Supplier returned an unexpected product-feed location',feed_location_diagnostic:{https:u.protocol==='https:',host_is_expected:u.hostname==='api.chattanoogashooting.com',host_suffix:u.hostname.endsWith('.chattanoogashooting.com')?'chattanoogashooting.com':'other',path_shape:u.pathname.split('/').filter(Boolean).slice(0,3).map(part=>/^[a-z_-]{1,24}$/i.test(part)?part:'[redacted]').join('/'),has_query:!!u.search,approved_host:u.hostname==='api.chattanoogashooting.com'},note:'No download attempted. Share only this diagnostic metadata with support; never share the signed feed URL.'});
+      }
+      // CSSI support confirms product-feed links may be HTTP. Never fetch those
+      // links over plaintext: even a CSV can disclose private supplier catalog data.
+      if(u.protocol==='http:'){
+        res.set('Cache-Control','no-store');
+        return res.status(409).json({error:'Chattanooga supplied its documented HTTP CSV location. Download intentionally blocked pending confirmation of an HTTPS alternative.',feed_location_diagnostic:{https:false,host_is_expected:true,host_suffix:'chattanoogashooting.com',path_shape:'rest/v6/files',has_query:!!u.search,approved_host:true},note:'Supplier URL format confirmed by CSSI support. No insecure CSV download attempted; no products changed.'});
       }
       step='downloading CSV header';
       const controller=new AbortController();
