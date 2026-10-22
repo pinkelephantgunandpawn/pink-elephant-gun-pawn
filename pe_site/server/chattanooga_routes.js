@@ -296,6 +296,36 @@ export function createChattanoogaRouter(pool) {
       res.set('Cache-Control','no-store');res.json({...rows[0],note:'Local snapshot counts; freshness does not guarantee available or allocated supplier stock.'});
     }catch(e){fail(res,e);}
   });
+  // Contract-based fulfillment planning only: never transmits orders, FFLs,
+  // customer addresses or license documents to the distributor.
+  router.post('/fulfillment-preview',(req,res)=>{
+    const kind=req.body?.kind;
+    const weight=req.body?.weight_lb;
+    const insured=req.body?.insured_value_usd??0;
+    const fflNumberProvided=req.body?.ffl_number_provided===true;
+    const fflDocumentProvided=req.body?.ffl_document_provided===true;
+    const shippingRegion=req.body?.shipping_region??'contiguous_us';
+    if(!['handgun','long_gun','optics'].includes(kind))return res.status(400).json({error:'Choose handgun, long_gun, or optics'});
+    if(typeof weight!=='number'||!Number.isFinite(weight)||weight<=0||weight>300)return res.status(400).json({error:'Weight must be a number between 0 and 300 lb'});
+    if(typeof insured!=='number'||!Number.isFinite(insured)||insured<0||insured>1000000)return res.status(400).json({error:'Insured value must be between $0 and $1,000,000'});
+    if(shippingRegion!=='contiguous_us')return res.status(422).json({error:'Published flat-rate estimates apply only to the contiguous 48 states; obtain a supplier quote for other destinations'});
+    const firearm=kind!=='optics';
+    const shippingMethod=kind==='handgun'?'Second Day Air':kind==='long_gun'?'Ground Premium':'Ground Economy';
+    const rateCents=kind==='handgun'?1495:kind==='long_gun'?1395:895;
+    const bracketLb=kind==='optics'?8:30;
+    const units=Math.ceil(weight/bracketLb);
+    const baseShippingCents=units*rateCents;
+    const insuranceCents=Math.ceil(insured/100)*100;
+    const warnings=['Estimate only; CSSI may change rates and apply surcharges.','Does not verify stock allocation, MAP/UPP, legal eligibility, or destination FFL license validity.'];
+    if(firearm&&!fflNumberProvided)warnings.push('Receiving dealer FFL number required.');
+    if(firearm&&!fflDocumentProvided)warnings.push('Receiving dealer FFL PDF/JPG required.');
+    if(firearm)warnings.push('Firearms must be separate from non-FFL goods; handguns and long guns require separate supplier orders.');
+    res.set('Cache-Control','no-store');
+    res.json({kind,shipping_method:shippingMethod,weight_lb:weight,rate_bracket_lb:bracketLb,rate_brackets:units,base_shipping_cents:baseShippingCents,optional_insurance_cents:insuranceCents,estimated_total_cents:baseShippingCents+insuranceCents,
+      ffl_documents_reported_complete:!firearm||(fflNumberProvided&&fflDocumentProvided),
+      order_submission_enabled:false,checkout_enabled:false,quote_binding:false,
+      exclusions:'Minimum-order fees, address changes, restocking, surcharges, taxes, FFL dealer fees and non-contiguous shipping not included.',warnings});
+  });
   // No live ordering: give managers a private, local-only checklist of
   // drafts that pass basic data checks. This is NOT a launch authorization.
   router.get('/candidate-summary',async(_req,res)=>{
