@@ -121,3 +121,19 @@ test('supplier JSON must be a response object, not an array or scalar',async()=>
     await assert.rejects(client.getItems({page:1}),e=>e.status===502);
   }
 });
+
+test('supplier credentials stay in request headers, never query strings',async()=>{
+  const requests=[];
+  const client=createChattanoogaClient({sid:'test-sid-private',token:'test-token-private',fetchImpl:async(url,options)=>{
+    requests.push({url:String(url),options});
+    return {ok:true,status:200,json:async()=>({items:[]})};
+  }});
+  await client.getItems({page:1});
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].url.includes('test-sid-private'),false);
+  assert.equal(requests[0].url.includes('test-token-private'),false);
+  assert.equal(requests[0].options.method,'GET');
+  assert.equal(requests[0].options.redirect,'error');
+  assert.ok(requests[0].options.headers.Authorization.startsWith('Basic test-sid-private:'));
+  assert.equal(requests[0].options.headers.Authorization.includes('test-token-private'),false);
+});
