@@ -267,7 +267,7 @@ export function createChattanoogaRouter(pool) {
     if(markup_percent!==undefined&&(!Number.isFinite(markup_percent)||markup_percent<0||markup_percent>500))return res.status(400).json({error:'Invalid markup'});
     if(price_override_cents!==undefined&&price_override_cents!==null&&(!Number.isSafeInteger(price_override_cents)||price_override_cents<0))return res.status(400).json({error:'Invalid override'});
     // Overrides are private draft targets; the computed advertised price always floors at MAP.
-    try{const {rows}=await pool.query(`UPDATE distributor_catalog SET markup_percent=COALESCE($2,markup_percent),price_override_cents=CASE WHEN $3 THEN $4 ELSE price_override_cents END,updated_at=now() WHERE id=$1 AND supplier='chattanooga' AND status='draft' RETURNING id,status`,[req.params.id,markup_percent??null,price_override_cents!==undefined,price_override_cents??null]);if(!rows.length)return res.status(404).json({error:'Not found'});res.json(rows[0]);}catch(e){fail(res,e);}
+    try{const {rows}=await pool.query(`UPDATE distributor_catalog SET markup_percent=COALESCE($2,markup_percent),price_override_cents=CASE WHEN $3 THEN $4 ELSE price_override_cents END,review_status='pending',reviewed_at=NULL,updated_at=now() WHERE id=$1 AND supplier='chattanooga' AND status='draft' RETURNING id,status`,[req.params.id,markup_percent??null,price_override_cents!==undefined,price_override_cents??null]);if(!rows.length)return res.status(404).json({error:'Not found'});res.json(rows[0]);}catch(e){fail(res,e);}
   });
   // Publishing stays disabled until cost semantics, MAP and shipping restrictions are verified.
   // Admin approval is a separate explicit action and never implies publication.
@@ -277,7 +277,7 @@ export function createChattanoogaRouter(pool) {
   router.post('/products/:id/approve',async(req,res)=>{
     try {
       const {rows}=await pool.query(`UPDATE distributor_catalog SET review_status='approved',reviewed_at=now(),updated_at=now()
-        WHERE id=$1 AND review_status='pending' AND category IN ('Firearms','Optics') RETURNING id,review_status,status`,[req.params.id]);
+        WHERE id=$1 AND supplier='chattanooga' AND status='draft' AND review_status='pending' AND category IN ('Firearms','Optics') RETURNING id,review_status,status`,[req.params.id]);
       if(!rows.length)return res.status(409).json({error:'Product not pending approval or not found'});
       res.json({...rows[0],published:false});
     }catch(e){fail(res,e);}
@@ -285,7 +285,7 @@ export function createChattanoogaRouter(pool) {
   router.post('/products/:id/reject',async(req,res)=>{
     try {
       const {rows}=await pool.query(`UPDATE distributor_catalog SET review_status='rejected',reviewed_at=now(),updated_at=now()
-        WHERE id=$1 AND review_status='pending' RETURNING id,review_status,status`,[req.params.id]);
+        WHERE id=$1 AND supplier='chattanooga' AND status='draft' AND review_status='pending' AND category IN ('Firearms','Optics') RETURNING id,review_status,status`,[req.params.id]);
       if(!rows.length)return res.status(409).json({error:'Product not pending approval or not found'});
       res.json({...rows[0],published:false});
     }catch(e){fail(res,e);}
@@ -294,10 +294,10 @@ export function createChattanoogaRouter(pool) {
   router.post('/sync',(_req,res)=>res.status(409).json({error:'Supplier inventory sync is disabled until catalog pricing and fulfillment are verified'}));
   router.post('/products/:id/hide',async(req,res)=>{
     const db=await pool.connect();try{await db.query('BEGIN');
-      const {rows}=await db.query('SELECT inventory_id FROM distributor_catalog WHERE id=$1 FOR UPDATE',[req.params.id]);
+      const {rows}=await db.query('SELECT inventory_id FROM distributor_catalog WHERE id=$1 AND supplier='chattanooga' FOR UPDATE',[req.params.id]);
       if(!rows.length){await db.query('ROLLBACK');return res.status(404).json({error:'Not found'});}
       if(rows[0].inventory_id)await db.query('UPDATE inventory SET public_visible=false,updated_at=now() WHERE id=$1',[rows[0].inventory_id]);
-      await db.query("UPDATE distributor_catalog SET status='hidden',updated_at=now() WHERE id=$1",[req.params.id]);
+      await db.query("UPDATE distributor_catalog SET status='hidden',updated_at=now() WHERE id=$1 AND supplier='chattanooga'",[req.params.id]);
       await db.query('COMMIT');res.json({hidden:true});
     }catch(e){await db.query('ROLLBACK');fail(res,e);}finally{db.release();}
   });
