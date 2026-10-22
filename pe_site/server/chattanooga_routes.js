@@ -76,13 +76,17 @@ export function createChattanoogaRouter(pool) {
   // Read-only product-feed diagnostic: fetch only a small prefix of the supplier CSV.
   // Never expose a signed feed URL, API credentials, or item records to the browser.
   router.get('/product-feed/diagnostics',async(_req,res)=>{
+    let step='requesting supplier feed';
     try{
       const feed=await client().getProductFeed({optional_columns:'retail_map,specifications',primary_image_only_flag:1});
+      step='checking supplier feed response';
       const link=feed?.product_feed?.url;
       if(typeof link!=='string')return res.status(502).json({error:'Supplier did not return a product-feed URL'});
+      step='validating supplier CSV location';
       const u=new URL(link);
       if(u.protocol!=='https:'||u.hostname!=='api.chattanoogashooting.com'||!/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(u.pathname)||u.username||u.password)
         return res.status(502).json({error:'Supplier returned an unexpected product-feed location'});
+      step='downloading CSV header';
       const controller=new AbortController();
       const timer=setTimeout(()=>controller.abort(),12000);
       let response;
@@ -100,6 +104,7 @@ export function createChattanoogaRouter(pool) {
             prefix+=decoder.decode(chunk.value,{stream:true});
           }
         }finally{await reader.cancel().catch(()=>{});}
+        step='parsing CSV columns';
         const header=prefix.split(/\r?\n/,1)[0].replace(/^\uFEFF/,'');
         if(!header||header.length>16384)throw Error('Invalid CSV header');
         const columns=header.match(/("(?:[^"]|"")*"|[^,]*)(,|$)/g)?.map(x=>x.replace(/,$/,'').replace(/^"|"$/g,'').replace(/""/g,'"').trim()).filter(Boolean)||[];
@@ -107,7 +112,7 @@ export function createChattanoogaRouter(pool) {
         res.set('Cache-Control','no-store');
         res.json({column_count:columns.length,columns:columns.slice(0,150),image_columns:columns.filter(x=>/image|photo|picture|media|thumbnail/i.test(x)),map_columns:columns.filter(x=>/map|minimum.advertised/i.test(x)),stock_columns:columns.filter(x=>/inventory|stock|allocat|quantity/i.test(x)),notice:'Read-only column inspection. No CSV saved, products staged, or supplier orders submitted.'});
       }finally{clearTimeout(timer);}
-    }catch(e){console.error('Chattanooga product feed diagnostic:',e?.message);res.status(502).json({error:'Could not inspect product-feed headers; no products were changed'});}
+    }catch(e){console.error('Chattanooga product feed diagnostic:',e?.message);res.status(502).json({error:'Product-feed inspection failed at '+step+'. No products changed.',supplier_status:Number.isInteger(e?.status)?e.status:null,supplier_code:Number.isInteger(e?.code)?e.code:null});}
   });
   router.get('/field-diagnostics',async(_req,res)=>{try{
     const data=await client().getItems({page:1,per_page:3});
