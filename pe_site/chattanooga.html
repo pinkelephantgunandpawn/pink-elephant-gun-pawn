@@ -9,7 +9,7 @@ const API=window.location.origin; // Keep admin bearer tokens on the same origin
 const token=localStorage.getItem('pe_token');if(!token){document.body.innerHTML='<h2>Admin sign-in required</h2><a href="/admin">Go to admin login</a>';throw Error('Not signed in');}
 const $=id=>document.getElementById(id),escapeHtml=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let page=1,remote=[],selected=new Set(),draftPage=1,lastDraftCount=0;
-async function api(path,options={}){const r=await fetch(API+path,{...options,headers:{'Content-Type':'application/json',Authorization:'Bearer '+token,...options.headers}});const data=await r.json();if(!r.ok){const err=Error(data.error||'Request failed');if(data.feed_location_diagnostic){const d=data.feed_location_diagnostic;err.feedLocationDiagnostic='Supplier feed route check: expected host '+(d.host_is_expected?'yes':'no')+'; domain group '+String(d.host_suffix||'unknown')+'; path shape '+String(d.path_shape||'unknown')+'; signed/query parameters present '+(d.has_query?'yes':'no')+'. No URL or credentials displayed.';}throw err;}return data;}
+async function api(path,options={}){const r=await fetch(API+path,{...options,headers:{'Content-Type':'application/json',Authorization:'Bearer '+token,...options.headers}});const data=await r.json();if(!r.ok){const err=Error(data.error||'Request failed');if(data.feed_location_diagnostic){const d=data.feed_location_diagnostic;err.feedLocationDiagnostic='Supplier feed route check: expected host '+(d.host_is_expected?'yes':'no')+'; domain group '+String(d.host_suffix||'unknown')+'; path shape '+String(d.path_shape||'unknown')+'; query parameters present '+(d.has_query?'yes':'no')+'. No URL or credentials displayed.';}throw err;}return data;}
 const msg=(s,bad=false)=>{$('message').textContent=s;$('message').style.color=bad?'#ff9696':'#8de6a4';};
 function cardImage(url){try{const u=new URL(url);if(['https:','http:'].includes(u.protocol))return '<img loading="lazy" src="'+escapeHtml(u.href)+'" alt="Product image" onerror="this.replaceWith(document.createTextNode(\'Image coming soon\'))">';}catch{}return '<p class="muted">Image coming soon</p>';}
 async function loadRemote(){
@@ -31,7 +31,7 @@ function renderRemote(){
       const heading=document.createElement('h3');heading.textContent=x.title||'Untitled';
       const details=document.createElement('p');details.textContent=(x.category||'')+' | '+(x.brand||'')+' | '+(x.sku||'');
       const cost=document.createElement('p');cost.textContent='Cost: $'+(Number(x.cost_cents||0)/100).toFixed(2);
-      const suggested=document.createElement('p');suggested.textContent=x.map_cents==null?'Internal 20% price estimate: 
+      const suggested=document.createElement('p');suggested.textContent=x.map_cents==null?'Internal 20% price estimate: $'+(Math.round(Number(x.cost_cents||0)*1.2)/100).toFixed(2)+' — MAP unverified; not for advertising':'MAP-safe price preview: $'+(Math.max(Math.round(Number(x.cost_cents||0)*1.2),Number(x.map_cents))/100).toFixed(2)+' — policy verification pending';
       const stock=document.createElement('p');stock.textContent='Supplier quantity: '+(x.quantity??0);
       card.append(label,heading,details,cost,suggested,stock);root.append(card);
       if(x.image_url){const img=document.createElement('img');img.src=x.image_url;img.alt='Product image';img.onerror=()=>img.remove();card.insertBefore(img,heading);}
@@ -58,134 +58,6 @@ $('remote').addEventListener('change',e=>{if(e.target.dataset.select!==undefined
 $('all').onchange=e=>{remote.forEach(x=>e.target.checked?selected.add(x.id):selected.delete(x.id));loadRemoteView();};
 function loadRemoteView(){document.querySelectorAll('[data-select]').forEach(el=>el.checked=selected.has(remote[Number(el.dataset.select)]?.id));}
 $('feed-diagnostics').onclick=async()=>{const button=$('feed-diagnostics');button.disabled=true;$('field-report').textContent='Inspecting supplier CSV headers...';try{const d=await api('/api/admin/chattanooga/product-feed/diagnostics');$('field-report').textContent='Feed columns ('+d.column_count+'): '+d.columns.join(', ')+' | Image fields: '+(d.image_columns.join(', ')||'none')+' | MAP fields: '+(d.map_columns.join(', ')||'none')+' | Stock fields: '+(d.stock_columns.join(', ')||'none');msg('Read-only feed inspection complete. No products changed.');}catch(e){msg(e.message,true);$('field-report').textContent=e.feedLocationDiagnostic||'Feed inspection failed; no products changed.';}finally{button.disabled=false;}};
-$('sku-diagnostics').onclick=async()=>{try{const sku=$('sku-check').value.trim();const d=await api('/api/admin/chattanooga/sku-diagnostics?sku='+encodeURIComponent(sku));$('field-report').textContent='SKU '+d.sku+' | '+d.title+' | Recognized: '+(d.recognized_category||'No')+' | Image fields: '+(d.image_field_names.join(', ')||'none')+' | Category fields: '+(d.category_field_names.join(', ')||'none')+' | Usable image: '+(d.has_usable_image?'Yes':'No')+' | Supplier qty: '+d.available_quantity_reported;}catch(e){msg(e.message,true);}};$('diagnostics').onclick=async()=>{try{const data=await api('/api/admin/chattanooga/field-diagnostics');$('field-report').textContent='Supplier photo fields: '+(data.image_field_names.join(', ')||'none detected')+' | Category fields: '+(data.category_field_names.join(', ')||'none detected')+' | Sampled '+data.sample_size+' items.';}catch(e){msg(e.message,true);}};$('connect').onclick=loadRemote;$('previous').onclick=()=>{page=Math.max(1,page-1);selected.clear();loadRemote();};$('next').onclick=()=>{page++;selected.clear();loadRemote();};
-$('stage').onclick=async()=>{try{const items=remote.filter(x=>selected.has(x.id)).map(x=>({cssi_id:x.id}));if(!items.length)return msg('Select products first',true);if(items.length>10)return msg('Stage at most 10 products at a time',true);const result=await api('/api/admin/chattanooga/stage',{method:'POST',body:JSON.stringify({items})});selected.clear();msg(result.staged+' products staged');await loadDrafts();}catch(e){msg(e.message,true);}};
-async function loadReadiness(){try{const d=await api('/api/admin/chattanooga/readiness');const fields=[['Scoped drafts',d.scoped_drafts],['Approved drafts',d.approved_drafts],['Pending review',d.pending_drafts],['MAP unverified',d.missing_map_verification],['Missing images',d.missing_images],['Zero reported stock',d.zero_reported_stock],['Published records',d.published_rows]];$('readiness-report').innerHTML=fields.map(([name,count])=>'<div class="product"><strong>'+escapeHtml(name)+'</strong><p>'+Number(count||0)+'</p></div>').join('');}catch(e){$('readiness-report').textContent='Readiness unavailable: '+e.message;}}
-$('readiness-refresh').onclick=loadReadiness;
-async function loadDrafts(){
-  try{
-    const q=new URLSearchParams({status:$('status').value,category:$('category').value,search:$('search').value,attention:$('attention').value,page:String(draftPage),limit:'50'});
-    const [products,categories]=await Promise.all([api('/api/admin/chattanooga/products?'+q),api('/api/admin/chattanooga/categories')]);
-    lastDraftCount=products.length;$('draft-page').textContent='Page '+draftPage+' · '+products.length+' shown';$('draft-prev').disabled=draftPage<=1;$('draft-next').disabled=products.length<50;
-    const old=$('category').value;
-    $('category').innerHTML='<option value="">All categories</option>'+categories.map(c=>'<option value="'+escapeHtml(c.category)+'">'+escapeHtml(c.category)+' ('+c.total+')</option>').join('');
-    $('category').value=old;
-    $('products').innerHTML=products.map(x=>{
-      const safeId=escapeHtml(x.id);
-      const lastRefresh=x.last_synced_at?new Date(x.last_synced_at).toLocaleString():'Never';
-      const mapLabel=x.map_cents==null?'Not provided — verify with supplier':'Supplier feed: $'+(Number(x.map_cents)/100).toFixed(2)+' — policy verification pending';
-      const photoLabel=x.image_url?'URL present — usage rights unverified':'Missing';
-      return '<div class="product">'+cardImage(x.image_url)
-        +'<span class="tag">'+escapeHtml(x.status)+' · '+escapeHtml(x.review_status||'pending')+' · '+escapeHtml(x.category)+'</span>'
-        +'<h3>'+escapeHtml(x.title)+'</h3>'
-        +'<p class="muted">'+escapeHtml(x.sku)+' · Stock '+Number(x.available_quantity||0)+'</p>'
-        +'<p>Cost $'+(Number(x.cost_cents)/100).toFixed(2)+'</p>'
-        +'<p class="muted">Last supplier refresh: '+escapeHtml(lastRefresh)+'</p>'
-        +'<p class="muted">MAP: '+escapeHtml(mapLabel)+'</p>'
-        +'<p class="muted">Photo: '+escapeHtml(photoLabel)+'</p>'
-        +'<p class="tag">Launch blocked — supplier terms, MAP, stock allocation, checkout and FFL verification pending</p>'
-        +'<label>Markup % <input type="number" min="0" max="500" step=".1" value="'+Number(x.markup_percent)+'" data-markup="'+safeId+'" style="width:90px"></label>'
-        +'<p>Internal proposed price: $'+(Number(x.retail_price_cents)/100).toFixed(2)+'</p>'
-        +'<p>MAP-safe advertised preview: '+(x.advertised_price_cents==null?'BLOCKED — MAP verification needed':'$'+(Number(x.advertised_price_cents)/100).toFixed(2))+'</p>'
-        +(x.below_map?'<p class="tag">Internal target below MAP — do not advertise this target.</p>':'')
-        +'<label>Price override $ <input type="number" min="0" step=".01" placeholder="Optional" value="'+(x.price_override_cents==null?'':(Number(x.price_override_cents)/100).toFixed(2))+'" data-price="'+safeId+'" style="width:110px"></label>'
-        +'<div class="toolbar"><button data-save="'+safeId+'">Save price</button><button data-availability="'+safeId+'" '+(x.status==='draft'?'':'disabled')+'>Check supplier stock</button><button data-refresh="'+safeId+'" '+(x.status==='draft'?'':'disabled')+'>Refresh supplier data</button><button data-approve="'+safeId+'" '+(x.review_status==='pending'?'':'disabled')+'>Approve</button><button class="danger" data-reject="'+safeId+'" '+(x.review_status==='pending'?'':'disabled')+'>Reject</button><button class="danger" data-hide="'+safeId+'">Hide</button></div></div>';
-    }).join('')||'<p>No matching products.</p>';
-  }catch(e){msg(e.message,true);}
-}
-$('products').onclick=async e=>{const el=e.target,id=el.dataset.save||el.dataset.availability||el.dataset.refresh||el.dataset.approve||el.dataset.reject||el.dataset.hide;if(!id)return;try{if(el.dataset.availability){const stock=await api('/api/admin/chattanooga/products/'+encodeURIComponent(id)+'/availability');msg('Supplier reports '+stock.reported_quantity+' units for '+stock.supplier_item_id+'. Not allocated or reserved for customer orders.');return;}else if(el.dataset.refresh){await api('/api/admin/chattanooga/products/'+id+'/refresh',{method:'POST'});}else if(el.dataset.save){const m=Number(document.querySelector('[data-markup="'+id+'"]').value),v=document.querySelector('[data-price="'+id+'"]').value;await api('/api/admin/chattanooga/products/'+id,{method:'PATCH',body:JSON.stringify({markup_percent:m,price_override_cents:v===''?null:Math.round(Number(v)*100)})});}else if(el.dataset.approve||el.dataset.reject){const action=el.dataset.approve?'approve':'reject';if(!confirm(action+' this product? This will not publish it.'))return;await api('/api/admin/chattanooga/products/'+id+'/'+action,{method:'POST'});}else if(el.dataset.hide){await api('/api/admin/chattanooga/products/'+id+'/hide',{method:'POST'});}msg(el.dataset.save?'Price saved. Approval reset to pending; no listing published.':'Product updated; no listing published.');await Promise.all([loadDrafts(),loadReadiness()]);}catch(e){msg(e.message,true);}};
-$('refresh').onclick=()=>Promise.all([loadDrafts(),loadReadiness()]);$('draft-prev').onclick=()=>{draftPage=Math.max(1,draftPage-1);loadDrafts();};$('draft-next').onclick=()=>{if(lastDraftCount===50){draftPage++;loadDrafts();}};$('sync').onclick=async()=>{if(!confirm('Refresh distributor stock and cost for up to 100 staged items?'))return;try{const r=await api('/api/admin/chattanooga/sync',{method:'POST'});msg('Updated '+r.updated+' products; skipped '+r.skipped);await loadDrafts();}catch(e){msg(e.message,true);}};for(const key of ['category','status','attention','search'])$(key).onchange=()=>{draftPage=1;loadDrafts();};loadDrafts();loadReadiness();
-</script></body></html>+(Math.round(Number(x.cost_cents||0)*1.2)/100).toFixed(2)+' — MAP unverified; not for advertising':'MAP-safe price preview: 
-      const stock=document.createElement('p');stock.textContent='Supplier quantity: '+(x.quantity??0);
-      card.append(label,heading,details,cost,suggested,stock);root.append(card);
-      if(x.image_url){const img=document.createElement('img');img.src=x.image_url;img.alt='Product image';img.onerror=()=>img.remove();card.insertBefore(img,heading);}
-    }
-    if(!remote.length){const p=document.createElement('p');p.textContent='No eligible firearms or optics in this batch. Try Next page.';root.append(p);}
-}
-$('reference-status').onclick=async()=>{try{const d=await api('/api/admin/chattanooga/reference/status');$('reference-result').textContent=d.categories.map(x=>x.category+': '+x.total).join(' | ')||'No reference uploaded yet';}catch(e){msg(e.message,true);}};
-$('reference-upload').onclick=async()=>{
-  const file=$('reference-file').files?.[0];
-  if(!file)return msg('Choose the filtered CSV file first',true);
-  if(file.size>5*1024*1024)return msg('Reference CSV must be under 5 MB',true);
-  if(!confirm('Replace the supplier classification reference? This will not stage or publish products.'))return;
-  const form=new FormData();form.append('file',file);
-  const button=$('reference-upload');button.disabled=true;
-  try{
-    const r=await fetch(API+'/api/admin/chattanooga/reference/upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:form});
-    const d=await r.json();if(!r.ok)throw Error(d.error||'Upload failed');
-    $('reference-result').textContent='Imported '+d.reference_rows+' reference SKUs: '+d.firearms+' firearms and '+d.optics+' optics. Nothing published.';
-    msg('Reference import complete. Preview individual SKUs to review products.');
-  }catch(e){msg(e.message,true);}finally{button.disabled=false;}
-};
-$('sku-preview').onclick=async()=>{try{const sku=$('sku-check').value.trim();const data=await api('/api/admin/chattanooga/lookup?sku='+encodeURIComponent(sku));remote=[data.product];selected.clear();$('connection').textContent='Exact SKU preview only. Select to stage as a draft; no publishing or ordering.';renderRemote();msg('Supplier SKU loaded for draft review.');}catch(e){msg(e.message,true);}};
-$('remote').addEventListener('change',e=>{if(e.target.dataset.select!==undefined){const x=remote[Number(e.target.dataset.select)];if(e.target.checked)selected.add(x.id);else selected.delete(x.id);}});
-$('all').onchange=e=>{remote.forEach(x=>e.target.checked?selected.add(x.id):selected.delete(x.id));loadRemoteView();};
-function loadRemoteView(){document.querySelectorAll('[data-select]').forEach(el=>el.checked=selected.has(remote[Number(el.dataset.select)]?.id));}
-$('feed-diagnostics').onclick=async()=>{const button=$('feed-diagnostics');button.disabled=true;$('field-report').textContent='Inspecting supplier CSV headers...';try{const d=await api('/api/admin/chattanooga/product-feed/diagnostics');$('field-report').textContent='Feed columns ('+d.column_count+'): '+d.columns.join(', ')+' | Image fields: '+(d.image_columns.join(', ')||'none')+' | MAP fields: '+(d.map_columns.join(', ')||'none')+' | Stock fields: '+(d.stock_columns.join(', ')||'none');msg('Read-only feed inspection complete. No products changed.');}catch(e){msg(e.message,true);$('field-report').textContent='Feed inspection failed; no products changed.';}finally{button.disabled=false;}};
-$('sku-diagnostics').onclick=async()=>{try{const sku=$('sku-check').value.trim();const d=await api('/api/admin/chattanooga/sku-diagnostics?sku='+encodeURIComponent(sku));$('field-report').textContent='SKU '+d.sku+' | '+d.title+' | Recognized: '+(d.recognized_category||'No')+' | Image fields: '+(d.image_field_names.join(', ')||'none')+' | Category fields: '+(d.category_field_names.join(', ')||'none')+' | Usable image: '+(d.has_usable_image?'Yes':'No')+' | Supplier qty: '+d.available_quantity_reported;}catch(e){msg(e.message,true);}};$('diagnostics').onclick=async()=>{try{const data=await api('/api/admin/chattanooga/field-diagnostics');$('field-report').textContent='Supplier photo fields: '+(data.image_field_names.join(', ')||'none detected')+' | Category fields: '+(data.category_field_names.join(', ')||'none detected')+' | Sampled '+data.sample_size+' items.';}catch(e){msg(e.message,true);}};$('connect').onclick=loadRemote;$('previous').onclick=()=>{page=Math.max(1,page-1);selected.clear();loadRemote();};$('next').onclick=()=>{page++;selected.clear();loadRemote();};
-$('stage').onclick=async()=>{try{const items=remote.filter(x=>selected.has(x.id)).map(x=>({cssi_id:x.id}));if(!items.length)return msg('Select products first',true);if(items.length>10)return msg('Stage at most 10 products at a time',true);const result=await api('/api/admin/chattanooga/stage',{method:'POST',body:JSON.stringify({items})});selected.clear();msg(result.staged+' products staged');await loadDrafts();}catch(e){msg(e.message,true);}};
-async function loadReadiness(){try{const d=await api('/api/admin/chattanooga/readiness');const fields=[['Scoped drafts',d.scoped_drafts],['Approved drafts',d.approved_drafts],['Pending review',d.pending_drafts],['MAP unverified',d.missing_map_verification],['Missing images',d.missing_images],['Zero reported stock',d.zero_reported_stock],['Published records',d.published_rows]];$('readiness-report').innerHTML=fields.map(([name,count])=>'<div class="product"><strong>'+escapeHtml(name)+'</strong><p>'+Number(count||0)+'</p></div>').join('');}catch(e){$('readiness-report').textContent='Readiness unavailable: '+e.message;}}
-$('readiness-refresh').onclick=loadReadiness;
-async function loadDrafts(){
-  try{
-    const q=new URLSearchParams({status:$('status').value,category:$('category').value,search:$('search').value,attention:$('attention').value,page:String(draftPage),limit:'50'});
-    const [products,categories]=await Promise.all([api('/api/admin/chattanooga/products?'+q),api('/api/admin/chattanooga/categories')]);
-    lastDraftCount=products.length;$('draft-page').textContent='Page '+draftPage+' · '+products.length+' shown';$('draft-prev').disabled=draftPage<=1;$('draft-next').disabled=products.length<50;
-    const old=$('category').value;
-    $('category').innerHTML='<option value="">All categories</option>'+categories.map(c=>'<option value="'+escapeHtml(c.category)+'">'+escapeHtml(c.category)+' ('+c.total+')</option>').join('');
-    $('category').value=old;
-    $('products').innerHTML=products.map(x=>{
-      const safeId=escapeHtml(x.id);
-      const lastRefresh=x.last_synced_at?new Date(x.last_synced_at).toLocaleString():'Never';
-      const mapLabel=x.map_cents==null?'Not provided — verify with supplier':'Supplier feed: $'+(Number(x.map_cents)/100).toFixed(2)+' — policy verification pending';
-      const photoLabel=x.image_url?'URL present — usage rights unverified':'Missing';
-      return '<div class="product">'+cardImage(x.image_url)
-        +'<span class="tag">'+escapeHtml(x.status)+' · '+escapeHtml(x.review_status||'pending')+' · '+escapeHtml(x.category)+'</span>'
-        +'<h3>'+escapeHtml(x.title)+'</h3>'
-        +'<p class="muted">'+escapeHtml(x.sku)+' · Stock '+Number(x.available_quantity||0)+'</p>'
-        +'<p>Cost $'+(Number(x.cost_cents)/100).toFixed(2)+'</p>'
-        +'<p class="muted">Last supplier refresh: '+escapeHtml(lastRefresh)+'</p>'
-        +'<p class="muted">MAP: '+escapeHtml(mapLabel)+'</p>'
-        +'<p class="muted">Photo: '+escapeHtml(photoLabel)+'</p>'
-        +'<p class="tag">Launch blocked — supplier terms, MAP, stock allocation, checkout and FFL verification pending</p>'
-        +'<label>Markup % <input type="number" min="0" max="500" step=".1" value="'+Number(x.markup_percent)+'" data-markup="'+safeId+'" style="width:90px"></label>'
-        +'<p>Internal proposed price: $'+(Number(x.retail_price_cents)/100).toFixed(2)+'</p>'
-        +'<p>MAP-safe advertised preview: '+(x.advertised_price_cents==null?'BLOCKED — MAP verification needed':'$'+(Number(x.advertised_price_cents)/100).toFixed(2))+'</p>'
-        +(x.below_map?'<p class="tag">Internal target below MAP — do not advertise this target.</p>':'')
-        +'<label>Price override $ <input type="number" min="0" step=".01" placeholder="Optional" value="'+(x.price_override_cents==null?'':(Number(x.price_override_cents)/100).toFixed(2))+'" data-price="'+safeId+'" style="width:110px"></label>'
-        +'<div class="toolbar"><button data-save="'+safeId+'">Save price</button><button data-availability="'+safeId+'" '+(x.status==='draft'?'':'disabled')+'>Check supplier stock</button><button data-refresh="'+safeId+'" '+(x.status==='draft'?'':'disabled')+'>Refresh supplier data</button><button data-approve="'+safeId+'" '+(x.review_status==='pending'?'':'disabled')+'>Approve</button><button class="danger" data-reject="'+safeId+'" '+(x.review_status==='pending'?'':'disabled')+'>Reject</button><button class="danger" data-hide="'+safeId+'">Hide</button></div></div>';
-    }).join('')||'<p>No matching products.</p>';
-  }catch(e){msg(e.message,true);}
-}
-$('products').onclick=async e=>{const el=e.target,id=el.dataset.save||el.dataset.availability||el.dataset.refresh||el.dataset.approve||el.dataset.reject||el.dataset.hide;if(!id)return;try{if(el.dataset.availability){const stock=await api('/api/admin/chattanooga/products/'+encodeURIComponent(id)+'/availability');msg('Supplier reports '+stock.reported_quantity+' units for '+stock.supplier_item_id+'. Not allocated or reserved for customer orders.');return;}else if(el.dataset.refresh){await api('/api/admin/chattanooga/products/'+id+'/refresh',{method:'POST'});}else if(el.dataset.save){const m=Number(document.querySelector('[data-markup="'+id+'"]').value),v=document.querySelector('[data-price="'+id+'"]').value;await api('/api/admin/chattanooga/products/'+id,{method:'PATCH',body:JSON.stringify({markup_percent:m,price_override_cents:v===''?null:Math.round(Number(v)*100)})});}else if(el.dataset.approve||el.dataset.reject){const action=el.dataset.approve?'approve':'reject';if(!confirm(action+' this product? This will not publish it.'))return;await api('/api/admin/chattanooga/products/'+id+'/'+action,{method:'POST'});}else if(el.dataset.hide){await api('/api/admin/chattanooga/products/'+id+'/hide',{method:'POST'});}msg(el.dataset.save?'Price saved. Approval reset to pending; no listing published.':'Product updated; no listing published.');await Promise.all([loadDrafts(),loadReadiness()]);}catch(e){msg(e.message,true);}};
-$('refresh').onclick=()=>Promise.all([loadDrafts(),loadReadiness()]);$('draft-prev').onclick=()=>{draftPage=Math.max(1,draftPage-1);loadDrafts();};$('draft-next').onclick=()=>{if(lastDraftCount===50){draftPage++;loadDrafts();}};$('sync').onclick=async()=>{if(!confirm('Refresh distributor stock and cost for up to 100 staged items?'))return;try{const r=await api('/api/admin/chattanooga/sync',{method:'POST'});msg('Updated '+r.updated+' products; skipped '+r.skipped);await loadDrafts();}catch(e){msg(e.message,true);}};for(const key of ['category','status','attention','search'])$(key).onchange=()=>{draftPage=1;loadDrafts();};loadDrafts();loadReadiness();
-</script></body></html>+(Math.max(Math.round(Number(x.cost_cents||0)*1.2),Number(x.map_cents))/100).toFixed(2)+' — policy verification pending';
-      const stock=document.createElement('p');stock.textContent='Supplier quantity: '+(x.quantity??0);
-      card.append(label,heading,details,cost,suggested,stock);root.append(card);
-      if(x.image_url){const img=document.createElement('img');img.src=x.image_url;img.alt='Product image';img.onerror=()=>img.remove();card.insertBefore(img,heading);}
-    }
-    if(!remote.length){const p=document.createElement('p');p.textContent='No eligible firearms or optics in this batch. Try Next page.';root.append(p);}
-}
-$('reference-status').onclick=async()=>{try{const d=await api('/api/admin/chattanooga/reference/status');$('reference-result').textContent=d.categories.map(x=>x.category+': '+x.total).join(' | ')||'No reference uploaded yet';}catch(e){msg(e.message,true);}};
-$('reference-upload').onclick=async()=>{
-  const file=$('reference-file').files?.[0];
-  if(!file)return msg('Choose the filtered CSV file first',true);
-  if(file.size>5*1024*1024)return msg('Reference CSV must be under 5 MB',true);
-  if(!confirm('Replace the supplier classification reference? This will not stage or publish products.'))return;
-  const form=new FormData();form.append('file',file);
-  const button=$('reference-upload');button.disabled=true;
-  try{
-    const r=await fetch(API+'/api/admin/chattanooga/reference/upload',{method:'POST',headers:{Authorization:'Bearer '+token},body:form});
-    const d=await r.json();if(!r.ok)throw Error(d.error||'Upload failed');
-    $('reference-result').textContent='Imported '+d.reference_rows+' reference SKUs: '+d.firearms+' firearms and '+d.optics+' optics. Nothing published.';
-    msg('Reference import complete. Preview individual SKUs to review products.');
-  }catch(e){msg(e.message,true);}finally{button.disabled=false;}
-};
-$('sku-preview').onclick=async()=>{try{const sku=$('sku-check').value.trim();const data=await api('/api/admin/chattanooga/lookup?sku='+encodeURIComponent(sku));remote=[data.product];selected.clear();$('connection').textContent='Exact SKU preview only. Select to stage as a draft; no publishing or ordering.';renderRemote();msg('Supplier SKU loaded for draft review.');}catch(e){msg(e.message,true);}};
-$('remote').addEventListener('change',e=>{if(e.target.dataset.select!==undefined){const x=remote[Number(e.target.dataset.select)];if(e.target.checked)selected.add(x.id);else selected.delete(x.id);}});
-$('all').onchange=e=>{remote.forEach(x=>e.target.checked?selected.add(x.id):selected.delete(x.id));loadRemoteView();};
-function loadRemoteView(){document.querySelectorAll('[data-select]').forEach(el=>el.checked=selected.has(remote[Number(el.dataset.select)]?.id));}
-$('feed-diagnostics').onclick=async()=>{const button=$('feed-diagnostics');button.disabled=true;$('field-report').textContent='Inspecting supplier CSV headers...';try{const d=await api('/api/admin/chattanooga/product-feed/diagnostics');$('field-report').textContent='Feed columns ('+d.column_count+'): '+d.columns.join(', ')+' | Image fields: '+(d.image_columns.join(', ')||'none')+' | MAP fields: '+(d.map_columns.join(', ')||'none')+' | Stock fields: '+(d.stock_columns.join(', ')||'none');msg('Read-only feed inspection complete. No products changed.');}catch(e){msg(e.message,true);$('field-report').textContent='Feed inspection failed; no products changed.';}finally{button.disabled=false;}};
 $('sku-diagnostics').onclick=async()=>{try{const sku=$('sku-check').value.trim();const d=await api('/api/admin/chattanooga/sku-diagnostics?sku='+encodeURIComponent(sku));$('field-report').textContent='SKU '+d.sku+' | '+d.title+' | Recognized: '+(d.recognized_category||'No')+' | Image fields: '+(d.image_field_names.join(', ')||'none')+' | Category fields: '+(d.category_field_names.join(', ')||'none')+' | Usable image: '+(d.has_usable_image?'Yes':'No')+' | Supplier qty: '+d.available_quantity_reported;}catch(e){msg(e.message,true);}};$('diagnostics').onclick=async()=>{try{const data=await api('/api/admin/chattanooga/field-diagnostics');$('field-report').textContent='Supplier photo fields: '+(data.image_field_names.join(', ')||'none detected')+' | Category fields: '+(data.category_field_names.join(', ')||'none detected')+' | Sampled '+data.sample_size+' items.';}catch(e){msg(e.message,true);}};$('connect').onclick=loadRemote;$('previous').onclick=()=>{page=Math.max(1,page-1);selected.clear();loadRemote();};$('next').onclick=()=>{page++;selected.clear();loadRemote();};
 $('stage').onclick=async()=>{try{const items=remote.filter(x=>selected.has(x.id)).map(x=>({cssi_id:x.id}));if(!items.length)return msg('Select products first',true);if(items.length>10)return msg('Stage at most 10 products at a time',true);const result=await api('/api/admin/chattanooga/stage',{method:'POST',body:JSON.stringify({items})});selected.clear();msg(result.staged+' products staged');await loadDrafts();}catch(e){msg(e.message,true);}};
 async function loadReadiness(){try{const d=await api('/api/admin/chattanooga/readiness');const fields=[['Scoped drafts',d.scoped_drafts],['Approved drafts',d.approved_drafts],['Pending review',d.pending_drafts],['MAP unverified',d.missing_map_verification],['Missing images',d.missing_images],['Zero reported stock',d.zero_reported_stock],['Published records',d.published_rows]];$('readiness-report').innerHTML=fields.map(([name,count])=>'<div class="product"><strong>'+escapeHtml(name)+'</strong><p>'+Number(count||0)+'</p></div>').join('');}catch(e){$('readiness-report').textContent='Readiness unavailable: '+e.message;}}
