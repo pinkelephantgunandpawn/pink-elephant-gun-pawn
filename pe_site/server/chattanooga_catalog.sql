@@ -29,3 +29,16 @@ CREATE INDEX IF NOT EXISTS distributor_catalog_supplier_sku_idx ON distributor_c
 
 ALTER TABLE distributor_catalog ADD COLUMN IF NOT EXISTS review_status text NOT NULL DEFAULT 'pending';
 ALTER TABLE distributor_catalog ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
+
+-- Dealer-provided CSV reference only. This table is NOT storefront inventory.
+CREATE TABLE IF NOT EXISTS chattanooga_reference (
+  supplier_item_id text PRIMARY KEY,
+  category text NOT NULL CHECK (category IN ('Firearms','Optics')),
+  supplier_category text NOT NULL DEFAULT '',
+  reference_title text NOT NULL DEFAULT '',
+  manufacturer text NOT NULL DEFAULT '',
+  upc text NOT NULL DEFAULT '',
+  map_cents integer CHECK (map_cents >= 0),
+  imported_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS chattanooga_reference_category_idx ON chattanooga_reference(category);
