@@ -326,6 +326,28 @@ export function createChattanoogaRouter(pool) {
       order_submission_enabled:false,checkout_enabled:false,quote_binding:false,
       exclusions:'Minimum-order fees, address changes, restocking, surcharges, taxes, FFL dealer fees and non-contiguous shipping not included.',warnings});
   });
+  // Contract-compliant order grouping preview. Never creates or transmits an order.
+  router.post('/order-group-preview',(req,res)=>{
+    const items=req.body?.items;
+    if(!Array.isArray(items)||items.length===0||items.length>100)return res.status(400).json({error:'Provide 1 to 100 order line types'});
+    const groups={handgun:[],long_gun:[],non_ffl:[]};
+    for(let i=0;i<items.length;i++){
+      const x=items[i];
+      if(!x||!['handgun','long_gun','optics'].includes(x.kind)||!Number.isInteger(x.quantity)||x.quantity<1||x.quantity>100)
+        return res.status(400).json({error:'Each line needs a valid kind and quantity from 1 to 100'});
+      const key=x.kind==='optics'?'non_ffl':x.kind;
+      groups[key].push({line:i+1,kind:x.kind,quantity:x.quantity});
+    }
+    const plan=Object.entries(groups).filter(([,lines])=>lines.length).map(([group,lines])=>({
+      group,lines,receiving_ffl_required:group!=='non_ffl',ffl_number_required:group!=='non_ffl',
+      ffl_pdf_or_jpg_required:group!=='non_ffl',supplier_order_created:false
+    }));
+    res.set('Cache-Control','no-store');
+    res.json({planned_orders:plan,planned_order_count:plan.length,order_submission_enabled:false,
+      warnings:['Firearms must be separate from non-FFL items; handguns and long guns cannot ship together.',
+        'This plan does not check FFL validity, product restrictions, pricing, inventory, customer eligibility or shipping charges.',
+        'Coordinate a test order with Chattanooga before any real supplier submission.']});
+  });
   // No live ordering: give managers a private, local-only checklist of
   // drafts that pass basic data checks. This is NOT a launch authorization.
   router.get('/candidate-summary',async(_req,res)=>{
