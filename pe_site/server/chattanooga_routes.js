@@ -184,7 +184,7 @@ export function createChattanoogaRouter(pool) {
         ON CONFLICT(supplier,supplier_item_id) DO UPDATE SET
         title=EXCLUDED.title,category=EXCLUDED.category,brand=EXCLUDED.brand,sku=EXCLUDED.sku,upc=EXCLUDED.upc,description=EXCLUDED.description,
         image_url=EXCLUDED.image_url,cost_cents=EXCLUDED.cost_cents,available_quantity=EXCLUDED.available_quantity,
-        raw_data=EXCLUDED.raw_data,map_cents=EXCLUDED.map_cents,last_synced_at=now(),updated_at=now()`,[x.id,x.title,x.category,x.brand,x.sku,x.upc,x.description,x.image_url,x.cost_cents,x.quantity,JSON.stringify(x.raw),x.map_cents]);}
+        raw_data=EXCLUDED.raw_data,map_cents=EXCLUDED.map_cents,review_status='pending',reviewed_at=NULL,last_synced_at=now(),updated_at=now() WHERE distributor_catalog.status='draft'`,[x.id,x.title,x.category,x.brand,x.sku,x.upc,x.description,x.image_url,x.cost_cents,x.quantity,JSON.stringify(x.raw),x.map_cents]);}
       await db.query('COMMIT');res.json({staged:normalized.length});
     }catch(e){await db.query('ROLLBACK');fail(res,e);}finally{db.release();}
   });
