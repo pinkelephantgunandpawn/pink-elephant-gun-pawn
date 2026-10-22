@@ -224,6 +224,18 @@ export function createChattanoogaRouter(pool) {
       res.json({...rows[0],supplier_orders_enabled:false,automatic_publishing_enabled:false,stock_allocation_verified:false,ffl_fulfillment_verified:false,note:'Local draft snapshot only. Missing MAP does not necessarily mean no manufacturer MAP; allocation is not verified.'});
     }catch(e){fail(res,e);}
   });
+  // Export only non-sensitive review metadata. Never include wholesale costs,
+  // signed image URLs, raw supplier records, or customer information.
+  router.get('/review-export',async(req,res)=>{
+    try{
+      const {rows}=await pool.query("SELECT supplier_item_id,sku,upc,title,category,brand,status,review_status,map_cents,image_url,available_quantity,last_synced_at FROM distributor_catalog WHERE supplier='chattanooga' AND status='draft' AND category IN ('Firearms','Optics') ORDER BY category,title LIMIT 20000");
+      const header=['Supplier ID','SKU','UPC','Title','Category','Brand','Review status','MAP provided','Photo URL present','Reported stock','Last refreshed'];
+      const cell=v=>'"'+String(v??'').replace(/[\r\n]+/g,' ').replace(/^([=+@-])/,'\'$1').replace(/"/g,'""')+'"';
+      const lines=[header.map(cell).join(',')];
+      for(const x of rows)lines.push([x.supplier_item_id,x.sku,x.upc,x.title,x.category,x.brand,x.review_status,x.map_cents!==null?'yes':'no',x.image_url?'yes':'no',x.available_quantity,x.last_synced_at?new Date(x.last_synced_at).toISOString():''].map(cell).join(','));
+      res.set('Cache-Control','no-store');res.set('Content-Type','text/csv; charset=utf-8');res.set('Content-Disposition','attachment; filename="chattanooga-draft-review.csv"');res.send('\uFEFF'+lines.join('\r\n')+'\r\n');
+    }catch(e){fail(res,e);}
+  });
   router.get('/categories',async(_req,res)=>{try{const {rows}=await pool.query("SELECT category,count(*)::int AS total,count(*) FILTER (WHERE status='draft')::int AS drafts,count(*) FILTER (WHERE status='published')::int AS published FROM distributor_catalog WHERE supplier='chattanooga' AND category IN ('Firearms','Optics') GROUP BY category ORDER BY category");res.json(rows);}catch(e){fail(res,e);}});
   router.get('/products',async(req,res)=>{try{
     const where=["supplier='chattanooga'"],values=[];
