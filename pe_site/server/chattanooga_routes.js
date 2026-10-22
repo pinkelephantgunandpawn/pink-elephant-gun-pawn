@@ -17,7 +17,12 @@ export function createChattanoogaRouter(pool) {
     const fields=[x.category_name,x.category,x.product_category,x.department_name,x.department,x.product_type,x.subcategory_name,x.subcategory].map(v=>String(v??'')).join(' ').toLowerCase();
     const name=String(x.name??x.title??x.description??'').toLowerCase();
     const excluded=/\b(?:powder|primers?|ammunition|ammo|magazines?|reloading|holsters?|mounts?|rings?|bases?|batter(?:y|ies)|cleaning|knives?|suppressors?|silencers?|airguns?|pellets?|accessories)\b/;
-    if(excluded.test(fields)||excluded.test(name))return null;
+    if(excluded.test(fields))return null;
+    // A handgun listing may mention included magazines; don't treat that as a magazine-only accessory.
+    const firearmTitle=/\\b(?:handgun|pistol|revolver|rifle|shotgun)\\b/.test(name);
+    const accessoryTitle=/\\b(?:magazine\\s+(?:for|fits|compatible)|replacement\\s+magazine|spare\\s+magazine|holster|scope\\s+mount|rifle\\s+case)\\b/.test(name);
+    if(excluded.test(name)&&!(firearmTitle&&!accessoryTitle))return null;
+    if(firearmTitle&&!accessoryTitle)return 'Firearms';
     if(/firearm|rifle|shotgun|handgun|pistol|revolver/.test(fields))return 'Firearms';
     if(/optic|riflescope|scope|red dot|reflex sight|binocular|rangefinder|spotting scope/.test(fields))return 'Optics';
     if(/riflescope|scope|red dot|reflex sight|binocular|rangefinder|spotting scope/.test(name))return 'Optics';
