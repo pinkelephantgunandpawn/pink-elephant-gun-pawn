@@ -69,6 +69,23 @@ export function createChattanoogaRouter(pool) {
     res.set('Cache-Control','no-store');
     const supplierItems=list(data);res.json({normalized:supplierItems.map(normalize).filter(Boolean).map(({raw,...item})=>item),page,per_page,supplier_count:supplierItems.length});
   }catch(e){res.status(e.status===401?502:502).json({error:'Chattanooga catalog unavailable',code:e.code??null});}});
+  // Read-only refresh of one staged SKU. Never publishes or modifies storefront inventory.
+  router.post('/products/:id/refresh',async(req,res)=>{
+    try{
+      const existing=await pool.query("SELECT supplier_item_id,status FROM distributor_catalog WHERE id=$1 AND supplier='chattanooga'",[req.params.id]);
+      if(!existing.rows.length)return res.status(404).json({error:'Product not found'});
+      if(existing.rows[0].status!=='draft')return res.status(409).json({error:'Only draft supplier records may be refreshed'});
+      const supplierId=existing.rows[0].supplier_item_id;
+      const data=await client().getItems({item_ids:supplierId});
+      const item=list(data).map(normalize).find(x=>x?.id===supplierId);
+      if(!item)return res.status(422).json({error:'Supplier item unavailable or outside firearms/optics scope; draft left unchanged'});
+      const {rows}=await pool.query(`UPDATE distributor_catalog SET title=$2,category=$3,brand=$4,sku=$5,upc=$6,description=$7,image_url=$8,cost_cents=$9,available_quantity=$10,raw_data=$11,last_synced_at=now(),updated_at=now()
+        WHERE id=$1 AND supplier='chattanooga' AND status='draft' RETURNING id,title,category,image_url,available_quantity,last_synced_at`,
+        [req.params.id,item.title,item.category,item.brand,item.sku,item.upc,item.description,item.image_url,item.cost_cents,item.quantity,JSON.stringify(item.raw)]);
+      if(!rows.length)return res.status(409).json({error:'Draft changed; refresh not applied'});
+      res.set('Cache-Control','no-store');res.json({...rows[0],published:false});
+    }catch(e){res.status(502).json({error:'Supplier refresh failed; existing draft retained'});}
+  });
   router.get('/categories',async(_req,res)=>{try{const {rows}=await pool.query("SELECT category,count(*)::int AS total,count(*) FILTER (WHERE status='draft')::int AS drafts,count(*) FILTER (WHERE status='published')::int AS published FROM distributor_catalog WHERE supplier='chattanooga' AND category IN ('Firearms','Optics') GROUP BY category ORDER BY category");res.json(rows);}catch(e){fail(res,e);}});
   router.get('/products',async(req,res)=>{try{
     const where=["supplier='chattanooga'"],values=[];
