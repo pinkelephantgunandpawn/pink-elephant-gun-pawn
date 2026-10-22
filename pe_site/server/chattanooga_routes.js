@@ -133,7 +133,7 @@ export function createChattanoogaRouter(pool) {
       const data=await client().getItems({item_ids:supplierId});
       const ref=await referenceFor(supplierId);const item=list(data).map(x=>normalize(x,ref)).find(x=>x?.id===supplierId);
       if(!item)return res.status(422).json({error:'Supplier item unavailable or outside firearms/optics scope; draft left unchanged'});
-      const {rows}=await pool.query(`UPDATE distributor_catalog SET title=$2,category=$3,brand=$4,sku=$5,upc=$6,description=$7,image_url=$8,cost_cents=$9,available_quantity=$10,raw_data=$11,map_cents=$12,last_synced_at=now(),updated_at=now()
+      const {rows}=await pool.query(`UPDATE distributor_catalog SET title=$2,category=$3,brand=$4,sku=$5,upc=$6,description=$7,image_url=$8,cost_cents=$9,available_quantity=$10,raw_data=$11,map_cents=$12,review_status='pending',reviewed_at=NULL,last_synced_at=now(),updated_at=now()
         WHERE id=$1 AND supplier='chattanooga' AND status='draft' RETURNING id,title,category,image_url,available_quantity,last_synced_at`,
         [req.params.id,item.title,item.category,item.brand,item.sku,item.upc,item.description,item.image_url,item.cost_cents,item.quantity,JSON.stringify(item.raw),item.map_cents]);
       if(!rows.length)return res.status(409).json({error:'Draft changed; refresh not applied'});
