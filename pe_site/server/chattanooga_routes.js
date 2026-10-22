@@ -89,6 +89,20 @@ export function createChattanoogaRouter(pool) {
         note:'Diagnostic only. No price, raw supplier record, or credentials exposed. This does not approve or publish products.'});
     }catch(e){res.status(502).json({error:'Unable to inspect supplier SKU'});}
   });
+  // Exact-SKU preview, read-only. Approval and publishing remain separate and disabled respectively.
+  router.get('/lookup',async(req,res)=>{
+    try{
+      const sku=text(req.query.sku,24);
+      if(!/^[A-Za-z0-9_-]{3,24}$/.test(sku))return res.status(400).json({error:'Invalid supplier item number'});
+      const data=await client().getItems({item_ids:sku});
+      const item=list(data).find(x=>String(x.cssi_id??x.item_id??x.sku??'').toUpperCase()===sku.toUpperCase());
+      if(!item)return res.status(404).json({error:'Supplier item not found'});
+      const product=normalize(item);
+      if(!product)return res.status(422).json({error:'Item not verified as firearm or optic, or supplier cost unavailable'});
+      const {raw,...preview}=product;
+      res.set('Cache-Control','no-store');res.json({product:preview,publishing_enabled:false});
+    }catch(e){res.status(502).json({error:'Supplier SKU lookup unavailable'});}
+  });
   router.get('/remote',async(req,res)=>{try{
     const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,50,50);
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
