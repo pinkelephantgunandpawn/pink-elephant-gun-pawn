@@ -16,7 +16,7 @@ export function createChattanoogaRouter(pool) {
   const scope=(x)=>{
     const fields=[x.category_name,x.category,x.product_category,x.department_name,x.department,x.product_type,x.subcategory_name,x.subcategory].map(v=>String(v??'')).join(' ').toLowerCase();
     const name=String(x.name??x.title??x.description??'').toLowerCase();
-    const excluded=/powder|primer|ammunition|ammo|magazine|reloading|holster|mount|ring|base|battery|cleaning|knife|suppressor|silencer|airgun|pellet|accessor/;
+    const excluded=/\b(?:powder|primers?|ammunition|ammo|magazines?|reloading|holsters?|mounts?|rings?|bases?|batter(?:y|ies)|cleaning|knives?|suppressors?|silencers?|airguns?|pellets?|accessories)\b/;
     if(excluded.test(fields)||excluded.test(name))return null;
     if(/firearm|rifle|shotgun|handgun|pistol|revolver/.test(fields))return 'Firearms';
     if(/optic|riflescope|scope|red dot|reflex sight|binocular|rangefinder|spotting scope/.test(fields))return 'Optics';
