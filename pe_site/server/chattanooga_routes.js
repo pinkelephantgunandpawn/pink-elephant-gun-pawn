@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { attachChattanoogaReferenceRoutes } from './chattanooga_reference.js';
-import { createChattanoogaClient, evaluateFflStatus } from './chattanooga_client.js';
+import { createChattanoogaClient, evaluateFflStatus, ChattanoogaApiError } from './chattanooga_client.js';
 import { retailPriceCents, parseSupplierMoneyCents, draftAdvertisedPrice } from './chattanooga_pricing.js';
 
 // All routes MUST be mounted behind the application's existing auth and manager role middleware.
@@ -19,6 +19,7 @@ export function createChattanoogaRouter(pool) {
       res.json({...result,source:'chattanooga_v6_read_only',checked_at:new Date().toISOString()});
     }catch(e){
       if(e instanceof TypeError||e instanceof RangeError)return res.status(400).json({error:'Invalid FFL number'});
+      if(e instanceof ChattanoogaApiError)return res.status(e.status===504?504:502).json({error:'Supplier FFL lookup unavailable or returned an invalid record'});
       fail(res,e);
     }
   });
