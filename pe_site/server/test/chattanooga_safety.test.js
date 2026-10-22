@@ -75,3 +75,20 @@ test('supplier network failures are sanitized and do not expose transport detail
   const client=createChattanoogaClient({sid:'test',token:'test',fetchImpl:async()=>{throw new Error('private upstream URL or token');}});
   await assert.rejects(client.getItems({page:1}),e=>e.status===502&&!e.message.includes('private upstream'));
 });
+
+test('supplier FFL response rejects missing, multiple, or nonmatching license records',()=>{
+  const license='122333445A66666';
+  const valid={ffl_number:license,on_file_flag:1,drop_ship_opted_out_flag:0};
+  for(const records of [null,[],[valid,valid],[{...valid,ffl_number:'999999999999999'}]]) {
+    assert.throws(()=>evaluateFflStatus({federal_firearms_licenses:records},license));
+  }
+});
+
+test('supplier FFL eligibility remains blocked when either status is unknown',()=>{
+  const license='122333445A66666';
+  for(const flags of [{on_file_flag:null,drop_ship_opted_out_flag:0},{on_file_flag:1,drop_ship_opted_out_flag:null}]) {
+    const result=evaluateFflStatus({federal_firearms_licenses:[{ffl_number:license,...flags}]},license);
+    assert.equal(result.eligible_for_supplier_drop_ship,false);
+    assert.equal(result.requires_manual_review,true);
+  }
+});
