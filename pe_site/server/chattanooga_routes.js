@@ -77,7 +77,7 @@ export function createChattanoogaRouter(pool) {
   // Never expose a signed feed URL, API credentials, or item records to the browser.
   router.get('/product-feed/diagnostics',async(_req,res)=>{
     try{
-      const feed=await client().getProductFeed({primary_image_only_flag:1});
+      const feed=await client().getProductFeed({optional_columns:'retail_map,specifications',primary_image_only_flag:1});
       const link=feed?.product_feed?.url;
       if(typeof link!=='string')return res.status(502).json({error:'Supplier did not return a product-feed URL'});
       const u=new URL(link);
