@@ -50,6 +50,14 @@ export function validateItemsParams(params = {}) {
   return params;
 }
 
+// V6 FFL identifiers are 15 characters, without hyphens. Never accept path fragments.
+export function normalizeFflNumber(value) {
+  if (typeof value !== 'string') throw new TypeError('FFL number must be a string');
+  const normalized = value.trim().replace(/-/g, '').toUpperCase();
+  if (!/^[A-Z0-9]{15}$/.test(normalized)) throw new RangeError('FFL number must be 15 alphanumeric characters without hyphens');
+  return normalized;
+}
+
 export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, token = process.env.CHATTANOOGA_TOKEN, fetchImpl = globalThis.fetch } = {}) {
   if (!sid || !token) throw new Error('Chattanooga credentials are not configured');
   if (typeof fetchImpl !== 'function') throw new Error('fetch is required');
@@ -58,7 +66,7 @@ export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, tok
   // Confirm against a real read-only request before enabling scheduled imports.
   const authorization = `Basic ${sid}:${hashedToken}`;
   async function get(endpoint, params = {}) {
-    if (!['items','items/product-feed','item-properties'].includes(endpoint)) throw new Error('Endpoint not allowed');
+    if (!['items','items/product-feed','item-properties'].includes(endpoint) && !/^federal-firearms-licenses\/[A-Z0-9]{15}$/.test(endpoint)) throw new Error('Endpoint not allowed');
     const url = new URL(endpoint, BASE_URL);
     for (const [key, value] of Object.entries(params)) {
       if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
@@ -79,6 +87,7 @@ export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, tok
   return Object.freeze({
     getItems: params => get('items', validateItemsParams(params)),
     getProductFeed: params => get('items/product-feed', validateProductFeedParams(params)),
-    getItemProperties: params => get('item-properties', params)
+    getItemProperties: params => get('item-properties', params),
+    getFflStatus: fflNumber => get('federal-firearms-licenses/' + normalizeFflNumber(fflNumber))
   });
 }
