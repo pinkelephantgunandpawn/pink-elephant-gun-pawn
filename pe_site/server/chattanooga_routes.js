@@ -19,8 +19,8 @@ export function createChattanoogaRouter(pool) {
     const excluded=/\b(?:powder|primers?|ammunition|ammo|magazines?|reloading|holsters?|mounts?|rings?|bases?|batter(?:y|ies)|cleaning|knives?|suppressors?|silencers?|airguns?|pellets?|accessories)\b/;
     if(excluded.test(fields))return null;
     // A handgun listing may mention included magazines; don't treat that as a magazine-only accessory.
-    const firearmTitle=/\\b(?:handgun|pistol|revolver|rifle|shotgun)\\b/.test(name);
-    const accessoryTitle=/\\b(?:magazine\\s+(?:for|fits|compatible)|replacement\\s+magazine|spare\\s+magazine|holster|scope\\s+mount|rifle\\s+case)\\b/.test(name);
+    const firearmTitle=/\b(?:handgun|pistol|revolver|rifle|shotgun)\b/.test(name);
+    const accessoryTitle=/\b(?:magazine\s+(?:for|fits|compatible)|replacement\s+magazine|spare\s+magazine|holster|scope\s+mount|rifle\s+case)\b/.test(name);
     if(excluded.test(name)&&!(firearmTitle&&!accessoryTitle))return null;
     if(firearmTitle&&!accessoryTitle)return 'Firearms';
     if(/firearm|rifle|shotgun|handgun|pistol|revolver/.test(fields))return 'Firearms';
