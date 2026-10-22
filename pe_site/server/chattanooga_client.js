@@ -64,7 +64,10 @@ export function evaluateFflStatus(response, requestedNumber) {
   const records=response?.federal_firearms_licenses;
   if(!Array.isArray(records)||records.length!==1)throw new ChattanoogaApiError('Unexpected supplier FFL response',502);
   const record=records[0];
-  if(typeof record?.ffl_number!=='string'||normalizeFflNumber(record.ffl_number)!==requested)
+  let returned;
+  try { returned=normalizeFflNumber(record?.ffl_number); }
+  catch { throw new ChattanoogaApiError('Supplier FFL returned an invalid license number',502); }
+  if(returned!==requested)
     throw new ChattanoogaApiError('Supplier FFL number mismatch',502);
   const valid=v=>[0,1,'0','1'].includes(v);
   const onFile=valid(record.on_file_flag)?(record.on_file_flag===1||record.on_file_flag==='1'):null;
