@@ -42,3 +42,5 @@ CREATE TABLE IF NOT EXISTS chattanooga_reference (
   imported_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS chattanooga_reference_category_idx ON chattanooga_reference(category);
+
+ALTER TABLE distributor_catalog ADD COLUMN IF NOT EXISTS map_cents integer CHECK (map_cents >= 0);
