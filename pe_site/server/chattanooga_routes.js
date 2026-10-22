@@ -305,6 +305,17 @@ export function createChattanoogaRouter(pool) {
       res.json({...rows[0],published:false});
     }catch(e){fail(res,e);}
   });
+  // A rejected draft can be returned to the pending review queue without
+  // approving or publishing it.
+  router.post('/products/:id/reopen',async(req,res)=>{
+    try{
+      const {rows}=await pool.query(`UPDATE distributor_catalog SET review_status='pending',reviewed_at=NULL,updated_at=now()
+        WHERE id=$1 AND supplier='chattanooga' AND status='draft' AND review_status='rejected'
+        AND category IN ('Firearms','Optics') RETURNING id,review_status,status`,[req.params.id]);
+      if(!rows.length)return res.status(409).json({error:'Only rejected firearm/optic drafts can be reopened'});
+      res.set('Cache-Control','no-store');res.json({...rows[0],published:false});
+    }catch(e){fail(res,e);}
+  });
   router.post('/products/:id/reject',async(req,res)=>{
     try {
       const {rows}=await pool.query(`UPDATE distributor_catalog SET review_status='rejected',reviewed_at=now(),updated_at=now()
