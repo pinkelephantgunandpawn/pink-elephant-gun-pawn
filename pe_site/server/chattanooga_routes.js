@@ -278,6 +278,24 @@ export function createChattanoogaRouter(pool) {
       res.set('Cache-Control','no-store');res.json({...rows[0],note:'Local snapshot counts; freshness does not guarantee available or allocated supplier stock.'});
     }catch(e){fail(res,e);}
   });
+  // No live ordering: give managers a private, local-only checklist of
+  // drafts that pass basic data checks. This is NOT a launch authorization.
+  router.get('/candidate-summary',async(_req,res)=>{
+    try{
+      const {rows}=await pool.query(`SELECT category,
+        count(*)::int AS drafts,
+        count(*) FILTER (WHERE review_status='approved' AND map_cents IS NOT NULL AND map_cents>=0
+          AND image_url IS NOT NULL AND image_url<>'' AND available_quantity>0
+          AND last_synced_at>=now()-interval '24 hours')::int AS data_complete_candidates,
+        count(*) FILTER (WHERE review_status='approved' AND (map_cents IS NULL OR map_cents<0))::int AS approved_missing_map,
+        count(*) FILTER (WHERE review_status='approved' AND (image_url IS NULL OR image_url=''))::int AS approved_missing_photo
+        FROM distributor_catalog WHERE supplier='chattanooga' AND status='draft'
+          AND category IN ('Firearms','Optics') GROUP BY category ORDER BY category`);
+      res.set('Cache-Control','no-store');
+      res.json({categories:rows,can_publish:false,can_accept_orders:false,allocation_verified:false,
+        note:'Data-complete candidates are not approved for publication or sale; fulfillment, restrictions, MAP interpretation and allocation remain gated.'});
+    }catch(e){fail(res,e);}
+  });
   router.get('/categories',async(_req,res)=>{try{const {rows}=await pool.query("SELECT category,count(*)::int AS total,count(*) FILTER (WHERE status='draft')::int AS drafts,count(*) FILTER (WHERE status='published')::int AS published FROM distributor_catalog WHERE supplier='chattanooga' AND category IN ('Firearms','Optics') GROUP BY category ORDER BY category");res.json(rows);}catch(e){fail(res,e);}});
   router.get('/products',async(req,res)=>{try{
     const where=["supplier='chattanooga'"],values=[];
