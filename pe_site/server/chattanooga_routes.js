@@ -62,6 +62,26 @@ export function createChattanoogaRouter(pool) {
     res.set('Cache-Control','no-store');
     res.json({sample_size:items.length,image_field_names:imageFields,category_field_names:categoryFields,eligible_count:items.map(normalize).filter(Boolean).length,notice:'Field names only; no credentials, supplier costs, or raw records exposed'});
   }catch(e){res.status(502).json({error:'Unable to inspect supplier field names'});}});
+  // Inspect one known supplier SKU safely: metadata only, no wholesale values or raw payload.
+  router.get('/sku-diagnostics',async(req,res)=>{
+    try{
+      const sku=text(req.query.sku,24);
+      if(!/^[A-Za-z0-9_-]{3,24}$/.test(sku))return res.status(400).json({error:'Enter a valid Chattanooga item number'});
+      const data=await client().getItems({item_ids:sku});
+      const items=list(data);
+      const item=items.find(x=>String(x.cssi_id??x.item_id??x.sku??'').toUpperCase()===sku.toUpperCase());
+      if(!item)return res.status(404).json({error:'Supplier SKU not found'});
+      const normalized=normalize(item);
+      const keys=Object.keys(item).sort();
+      res.set('Cache-Control','no-store');
+      res.json({sku,found:true,title:text(item.name??item.title,180),serialized_flag:item.serialized_flag===true||item.serialized_flag===1||item.serialized_flag==='1',
+        image_field_names:keys.filter(k=>/image|photo|picture|media|thumbnail|asset/i.test(k)),
+        category_field_names:keys.filter(k=>/categor|department|group|type|class|subcategor/i.test(k)),
+        recognized_category:normalized?.category??null,has_usable_image:!!normalized?.image_url,
+        available_quantity_reported:Number(item.inventory??0),
+        note:'Diagnostic only. No price, raw supplier record, or credentials exposed. This does not approve or publish products.'});
+    }catch(e){res.status(502).json({error:'Unable to inspect supplier SKU'});}
+  });
   router.get('/remote',async(req,res)=>{try{
     const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,50,50);
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
