@@ -219,7 +219,19 @@ export function createChattanoogaRouter(pool) {
     const where=["supplier='chattanooga'"],values=[];
     if(req.query.category){values.push(text(req.query.category,80));where.push(`category=$${values.length}`);}
     if(allowed.includes(req.query.status)){values.push(req.query.status);where.push(`status=$${values.length}`);}
-    if(req.query.search){values.push('%'+text(req.query.search,100)+'%');where.push(`(title ILIKE $${values.length} OR sku ILIKE $${values.length} OR brand ILIKE $${values.length} OR upc ILIKE $${values.length})`);}
+    if(req.query.search){values.push('%'+text(req.query.search,100)+'%');where.push(`(title ILIKE ${values.length} OR sku ILIKE ${values.length} OR brand ILIKE ${values.length} OR upc ILIKE ${values.length})`);}
+    const attention=text(req.query.attention,32);
+    const attentionFilters={
+      pending:"status='draft' AND review_status='pending'",
+      missing_image:"status='draft' AND (image_url IS NULL OR image_url='')",
+      map_unverified:"status='draft' AND map_cents IS NULL",
+      zero_stock:"status='draft' AND available_quantity=0",
+      approved:"status='draft' AND review_status='approved'"
+    };
+    if(attention && !Object.hasOwn(attentionFilters,attention))return res.status(400).json({error:'Invalid review filter'});
+    if(attention)where.push('('+attentionFilters[attention]+')');
+    where.push("category IN ('Firearms','Optics')");
+
     const limit=bounded(req.query.limit,50,100),offset=(bounded(req.query.page,1,100000)-1)*limit;
     values.push(limit,offset);
     const {rows}=await pool.query(`SELECT id,supplier_item_id,title,category,brand,sku,upc,description,image_url,cost_cents,map_cents,available_quantity,markup_percent,price_override_cents,status,review_status,reviewed_at,inventory_id,last_synced_at FROM distributor_catalog WHERE ${where.join(' AND ')} ORDER BY category,title LIMIT $${values.length-1} OFFSET $${values.length}`,values);
