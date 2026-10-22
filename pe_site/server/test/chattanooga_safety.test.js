@@ -92,3 +92,12 @@ test('supplier FFL eligibility remains blocked when either status is unknown',()
     assert.equal(result.requires_manual_review,true);
   }
 });
+
+test('supplier invalid JSON fails as gateway error',async()=>{
+  const client=createChattanoogaClient({sid:'test',token:'test',fetchImpl:async()=>({ok:true,status:200,json:async()=>{throw new SyntaxError('bad JSON');}})});
+  await assert.rejects(client.getItems({page:1}),e=>e.status===502);
+});
+test('supplier malformed HTTP response fails closed',async()=>{
+  const client=createChattanoogaClient({sid:'test',token:'test',fetchImpl:async()=>({status:200})});
+  await assert.rejects(client.getItems({page:1}),e=>e.status===502);
+});
