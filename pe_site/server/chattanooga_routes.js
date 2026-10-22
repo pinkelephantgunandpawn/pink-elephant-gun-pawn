@@ -392,7 +392,8 @@ export function createChattanoogaRouter(pool) {
       if(x.map_cents===null||x.map_cents<0)issues.push('MAP unverified');
       if(!x.image_url)issues.push('Product image missing');
       if(x.available_quantity===null||x.available_quantity<=0)issues.push('No reported supplier stock');
-      if(!x.last_synced_at||Date.now()-new Date(x.last_synced_at).getTime()>86400000)issues.push('Inventory snapshot older than 24 hours');
+      const refreshed=x.last_synced_at?new Date(x.last_synced_at).getTime():NaN;
+      if(!Number.isFinite(refreshed)||Date.now()-refreshed>86400000||refreshed>Date.now()+300000)issues.push('Inventory snapshot stale or invalid');
       res.set('Cache-Control','no-store');
       res.json({sku:x.sku,title:x.title,category:x.category,review_status:x.review_status,
         reported_quantity:x.available_quantity,last_refreshed:x.last_synced_at,
