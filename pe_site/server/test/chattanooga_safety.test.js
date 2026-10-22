@@ -114,3 +114,10 @@ test('supplier API calls refuse redirects and use only GET',async()=>{
   assert.equal(calls[0].redirect,'error');
   assert.match(calls[0].url,/^https:\/\/api\.chattanoogashooting\.com\/rest\/v6\/items\?/);
 });
+
+test('supplier JSON must be a response object, not an array or scalar',async()=>{
+  for(const invalid of [null,[],true,'unexpected',123]){
+    const client=createChattanoogaClient({sid:'test',token:'test',fetchImpl:async()=>({ok:true,status:200,json:async()=>invalid})});
+    await assert.rejects(client.getItems({page:1}),e=>e.status===502);
+  }
+});
