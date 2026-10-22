@@ -425,6 +425,7 @@ export function createChattanoogaRouter(pool) {
         // An explicit proposed kind is optional, but when provided it must agree
         // with the supplier's broad catalog category. Handgun versus long gun
         // still requires a separate verified classification.
+        if(line.kind===undefined&&matches.length===1&&matches[0].category==='Firearms')issues.push('Handgun versus long gun classification must be explicitly verified');
         if(line.kind!==undefined){
           if(!['handgun','long_gun','optics'].includes(line.kind))issues.push('Invalid proposed product type');
           else if(matches.length===1){
@@ -446,7 +447,9 @@ export function createChattanoogaRouter(pool) {
           local_data_complete:issues.length===0,issues,live_allocation_verified:false};
       });
       res.set('Cache-Control','no-store');
+      const firearmLines=results.filter(x=>x.category==='Firearms');
       res.json({results,all_local_data_complete:results.every(x=>x.local_data_complete),
+        firearm_classification_required:firearmLines.length>0,
         supplier_order_created:false,order_submission_enabled:false,
         warning:'Local inventory snapshots cannot confirm current availability or reserved stock. Do not use as an order approval.'});
     }catch(e){fail(res,e);}
