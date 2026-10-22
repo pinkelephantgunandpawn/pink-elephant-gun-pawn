@@ -58,6 +58,22 @@ export function normalizeFflNumber(value) {
   return normalized;
 }
 
+/** Interpret supplier FFL lookup conservatively: only explicit 1/0 flags are known. */
+export function evaluateFflStatus(response, requestedNumber) {
+  const requested=normalizeFflNumber(requestedNumber);
+  const records=response?.federal_firearms_licenses;
+  if(!Array.isArray(records)||records.length!==1)throw new ChattanoogaApiError('Unexpected supplier FFL response',502);
+  const record=records[0];
+  if(typeof record?.ffl_number!=='string'||normalizeFflNumber(record.ffl_number)!==requested)
+    throw new ChattanoogaApiError('Supplier FFL number mismatch',502);
+  const valid=v=>[0,1,'0','1'].includes(v);
+  const onFile=valid(record.on_file_flag)?(record.on_file_flag===1||record.on_file_flag==='1'):null;
+  const optedOut=valid(record.drop_ship_opted_out_flag)?(record.drop_ship_opted_out_flag===1||record.drop_ship_opted_out_flag==='1'):null;
+  return Object.freeze({ffl_number:requested,on_file:onFile,drop_ship_opted_out:optedOut,
+    eligible_for_supplier_drop_ship:onFile===true&&optedOut===false,
+    requires_manual_review:onFile!==true||optedOut!==false});
+}
+
 export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, token = process.env.CHATTANOOGA_TOKEN, fetchImpl = globalThis.fetch } = {}) {
   if (!sid || !token) throw new Error('Chattanooga credentials are not configured');
   if (typeof fetchImpl !== 'function') throw new Error('fetch is required');
