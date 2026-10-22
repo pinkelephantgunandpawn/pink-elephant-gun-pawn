@@ -236,13 +236,31 @@ export function createChattanoogaRouter(pool) {
       customer_supplier_checkout:'disabled',
       fulfillment_requirements:{
         secure_feed_download:'awaiting_https_confirmation',
-        firearm_receiving_ffl_validation:'awaiting_written_procedure',
-        firearm_shipping_rules:'awaiting_written_procedure',
-        dropship_fees_and_restrictions:'awaiting_written_confirmation',
-        api_order_testing:'awaiting_coordinated_test_plan',
+        firearm_receiving_ffl_validation:'ffl_number_and_pdf_or_jpg_required',
+        firearm_shipping_rules:'separate_firearms_from_non_ffl_and_handguns_from_long_guns',
+        dropship_fees_and_restrictions:'fulfillment_agreement_received_2026_10_16_rates_subject_to_change',
+        api_order_testing:'coordinate_with_sales_rep_before_real_test_order',
         allocated_inventory:'requires_supplier_verification'
       },
-      note:'Dropship account activation alone does not authorize automatic firearm orders, customer checkout, or publication.'
+      fulfillment_agreement:{
+        effective_date:'2026-10-16',
+        handgun_default_shipping_cents_per_30lb:1495,
+        long_gun_default_shipping_cents_per_30lb:1395,
+        accessory_ground_economy_cents_per_8lb:895,
+        accessory_ground_premium_cents_per_30lb:1095,
+        adult_signature_included_for_default_firearm_methods:true,
+        insurance_cents_per_100_dollars:100,
+        minimum_order_fee_cents:750,
+        minimum_order_fee_threshold_cents:5000,
+        restocking_fee_percent:15,
+        rates_subject_to_change:true,
+        ffl_document_formats:['pdf','jpg'],
+        mixed_firearm_non_ffl_order_allowed:false,
+        mixed_handgun_long_gun_order_allowed:false,
+        same_day_eligibility_cutoff:'12:00 PM EST (not guaranteed)',
+        source:'Signed CSSI fulfillment agreement dated 2026-10-16'
+      },
+      note:'Supplier authorization and contract terms confirmed. Automatic ordering, checkout and publication remain disabled pending implementation and testing.'
     });
   });
   // Export only non-sensitive review metadata. Never include wholesale costs,
