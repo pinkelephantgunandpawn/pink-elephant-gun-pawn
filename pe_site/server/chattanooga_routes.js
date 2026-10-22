@@ -235,7 +235,7 @@ export function createChattanoogaRouter(pool) {
       supplier_product_publication:'disabled',
       customer_supplier_checkout:'disabled',
       fulfillment_requirements:{
-        secure_feed_download:'awaiting_https_confirmation',
+        secure_feed_download:'http_only_confirmed_secure_alternative_needed',
         firearm_receiving_ffl_validation:'ffl_number_and_pdf_or_jpg_required',
         firearm_shipping_rules:'separate_firearms_from_non_ffl_and_handguns_from_long_guns',
         dropship_fees_and_restrictions:'fulfillment_agreement_received_2026_10_16_rates_subject_to_change',
