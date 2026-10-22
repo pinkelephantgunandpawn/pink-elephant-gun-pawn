@@ -112,7 +112,7 @@ export function createChattanoogaRouter(pool) {
         res.set('Cache-Control','no-store');
         res.json({column_count:columns.length,columns:columns.slice(0,150),image_columns:columns.filter(x=>/image|photo|picture|media|thumbnail/i.test(x)),map_columns:columns.filter(x=>/map|minimum.advertised/i.test(x)),stock_columns:columns.filter(x=>/inventory|stock|allocat|quantity/i.test(x)),notice:'Read-only column inspection. No CSV saved, products staged, or supplier orders submitted.'});
       }finally{clearTimeout(timer);}
-    }catch(e){console.error('Chattanooga product feed diagnostic:',e?.message);res.status(502).json({error:'Product-feed inspection failed at '+step+'. No products changed.',supplier_status:Number.isInteger(e?.status)?e.status:null,supplier_code:Number.isInteger(e?.code)?e.code:null});}
+    }catch(e){console.error('Chattanooga product feed diagnostic:',e?.message);res.status(502).json({error:'Product-feed inspection failed at '+step+'. Supplier HTTP status: '+(Number.isInteger(e?.status)?e.status:'unknown')+'; supplier code: '+(e?.code===undefined||e?.code===null?'none':String(e.code).slice(0,32))+'. No products changed.'});}
   });
   router.get('/field-diagnostics',async(_req,res)=>{try{
     const data=await client().getItems({page:1,per_page:3});
