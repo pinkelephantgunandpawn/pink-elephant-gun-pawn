@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { draftAdvertisedPrice, retailPriceCents, parseSupplierMoneyCents } from '../chattanooga_pricing.js';
-import { createChattanoogaClient, validateItemsParams, validateProductFeedParams, normalizeFflNumber } from '../chattanooga_client.js';
+import { createChattanoogaClient, validateItemsParams, validateProductFeedParams, normalizeFflNumber, evaluateFflStatus } from '../chattanooga_client.js';
 
 test('advertised price never falls below a verified MAP',()=>{
   const x=draftAdvertisedPrice({costCents:10000,mapCents:15000,markupPercent:20});
@@ -55,4 +55,17 @@ test('FFL status lookup uses GET and does not enable supplier writes',async()=>{
   assert.equal(calls[0].method,'GET');
   assert.match(calls[0].url,/federal-firearms-licenses\/122333445A66666$/);
   assert.equal('createOrder' in client,false);
+});
+
+test('FFL eligibility requires both explicit positive on-file and negative opt-out flags',()=>{
+  const ffl_number='122333445A66666';
+  const check=(on_file_flag,drop_ship_opted_out_flag)=>evaluateFflStatus({federal_firearms_licenses:[{ffl_number,on_file_flag,drop_ship_opted_out_flag}]},ffl_number);
+  assert.equal(check('1','0').eligible_for_supplier_drop_ship,true);
+  assert.equal(check('1','1').eligible_for_supplier_drop_ship,false);
+  assert.equal(check('0','0').eligible_for_supplier_drop_ship,false);
+  assert.equal(check('1',undefined).eligible_for_supplier_drop_ship,false);
+  assert.equal(check('true','0').eligible_for_supplier_drop_ship,false);
+  assert.equal(check('1','false').eligible_for_supplier_drop_ship,false);
+  assert.throws(()=>evaluateFflStatus({federal_firearms_licenses:[]},ffl_number));
+  assert.throws(()=>evaluateFflStatus({federal_firearms_licenses:[{ffl_number:'999999999999999'}]},ffl_number));
 });
