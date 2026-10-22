@@ -35,3 +35,11 @@ export function evaluateMapPrice({costCents, mapCents, markupPercent=CHATTANOOGA
   const proposedCents = retailPriceCents(costCents, markupPercent, overrideCents);
   return Object.freeze({ proposedCents, mapCents, suggestedCents: Math.max(proposedCents,mapCents), belowMap: proposedCents < mapCents });
 }
+
+/** Conservative advertised-price preview; missing MAP blocks compliance verification. */
+export function draftAdvertisedPrice({costCents,mapCents=null,markupPercent=CHATTANOOGA_DEFAULT_MARKUP,overrideCents=null}) {
+  const proposedCents=retailPriceCents(costCents,markupPercent,overrideCents);
+  if(mapCents===null||mapCents===undefined)return Object.freeze({proposedCents,advertisedCents:null,mapVerified:false,belowMap:null,readyForAdvertising:false});
+  if(!Number.isSafeInteger(mapCents)||mapCents<0)throw new RangeError('Invalid MAP');
+  return Object.freeze({proposedCents,advertisedCents:Math.max(proposedCents,mapCents),mapVerified:true,belowMap:proposedCents<mapCents,readyForAdvertising:true});
+}
