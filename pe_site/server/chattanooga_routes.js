@@ -348,6 +348,31 @@ export function createChattanoogaRouter(pool) {
         'This plan does not check FFL validity, product restrictions, pricing, inventory, customer eligibility or shipping charges.',
         'Coordinate a test order with Chattanooga before any real supplier submission.']});
   });
+  // Validate proposed fulfillment data without accepting or storing sensitive
+  // license files, addresses, customer identities, or creating supplier orders.
+  router.post('/order-validation-preview',(req,res)=>{
+    const items=req.body?.items;
+    if(!Array.isArray(items)||items.length<1||items.length>100)return res.status(400).json({error:'Provide 1 to 100 proposed order lines'});
+    const errors=[],warnings=[],groups={handgun:0,long_gun:0,optics:0};
+    for(let i=0;i<items.length;i++){
+      const line=items[i];
+      if(!line||!['handgun','long_gun','optics'].includes(line.kind)){errors.push('Line '+(i+1)+': unsupported product type');continue;}
+      if(!Number.isInteger(line.quantity)||line.quantity<1||line.quantity>100)errors.push('Line '+(i+1)+': quantity must be a whole number from 1 to 100');
+      else groups[line.kind]+=line.quantity;
+      if(typeof line.sku!=='string'||!line.sku.trim()||line.sku.length>80)errors.push('Line '+(i+1)+': valid supplier SKU required');
+    }
+    const firearm=groups.handgun>0||groups.long_gun>0;
+    if(firearm&&!req.body?.receiving_ffl_number_available)errors.push('Receiving FFL number must be available for firearm groups');
+    if(firearm&&!req.body?.receiving_ffl_document_available)errors.push('Receiving FFL PDF/JPG must be available for firearm groups');
+    if(firearm)warnings.push('Receiving dealer license authenticity, current status and destination eligibility must be verified separately.');
+    if(groups.handgun&&groups.long_gun)warnings.push('Handguns and long guns require separate supplier orders.');
+    if(firearm&&groups.optics)warnings.push('Firearms and non-FFL products require separate supplier orders.');
+    warnings.push('Supplier inventory allocation, pricing/MAP, legal eligibility, tax, shipping charges and API schema are not verified.');
+    res.set('Cache-Control','no-store');
+    res.json({passes_local_structure_checks:errors.length===0,errors,warnings,
+      proposed_groups:Object.entries(groups).filter(([,n])=>n>0).map(([kind,quantity])=>({kind,quantity})),
+      supplier_api_payload_generated:false,supplier_order_created:false,checkout_enabled:false});
+  });
   // No live ordering: give managers a private, local-only checklist of
   // drafts that pass basic data checks. This is NOT a launch authorization.
   router.get('/candidate-summary',async(_req,res)=>{
