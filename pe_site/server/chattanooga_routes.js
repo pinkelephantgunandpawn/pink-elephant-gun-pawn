@@ -147,7 +147,8 @@ export function createChattanoogaRouter(pool) {
       if(!rows.length)return res.status(404).json({error:'Draft not found'});
       const supplierId=rows[0].supplier_item_id;
       const data=await client().getItems({item_ids:supplierId});
-      const item=list(data).map(normalize).find(x=>x?.id===supplierId);
+      const reference=await referenceFor(supplierId);
+      const item=list(data).map(x=>normalize(x,reference)).find(x=>x?.id===supplierId);
       if(!item)return res.status(422).json({error:'Supplier availability not verifiable; do not promise stock'});
       res.set('Cache-Control','no-store');
       res.json({supplier_item_id:supplierId,reported_quantity:item.quantity,category:item.category,available_to_sell_verified:false,note:'Supplier quantity is informational, not a confirmed allocation or checkout reservation'});
