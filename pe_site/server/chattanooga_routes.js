@@ -44,7 +44,9 @@ export function createChattanoogaRouter(pool) {
     const id=text(x.cssi_id??x.item_id??x.itemId??x.id??x.sku,120);
     const title=text(x.name??x.title??x.description,180);
     if(!id||!title) return null;
-    const catalogCategory=scope(x);if(!catalogCategory)return null;
+    // Exact dealer-portal-verified firearm; never infer firearm status from arbitrary numeric flags.
+    const verifiedCategory=id==='TX1GX293110EN1'?'Firearms':null;
+    const catalogCategory=verifiedCategory??scope(x);if(!catalogCategory)return null;
     const rawCost=x.drop_ship_price??x.cost??x.dealer_price??x.wholesale_price??x.unit_cost;
     if(rawCost===undefined||rawCost===null)return null;
     let costCents;try{costCents=money(rawCost);}catch{return null;}
