@@ -87,8 +87,12 @@ export function createChattanoogaRouter(pool) {
       if(typeof link!=='string')return res.status(502).json({error:'Supplier did not return a product-feed URL'});
       step='validating supplier CSV location';
       const u=new URL(link);
-      if(u.protocol!=='https:'||u.hostname!=='api.chattanoogashooting.com'||!/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(u.pathname)||u.username||u.password)
-        return res.status(502).json({error:'Supplier returned an unexpected product-feed location'});
+      if(u.protocol!=='https:'||u.hostname!=='api.chattanoogashooting.com'||!/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(u.pathname)||u.username||u.password){
+        // Do not follow an unapproved URL. Expose only safe routing metadata,
+        // never the full link, signed query, path identifiers, or credentials.
+        res.set('Cache-Control','no-store');
+        return res.status(502).json({error:'Supplier returned an unexpected product-feed location',feed_location_diagnostic:{https:u.protocol==='https:',host:u.hostname.slice(0,100),path_shape:u.pathname.split('/').filter(Boolean).slice(0,4).map((part,i)=>i===3?'[redacted]':part).join('/'),has_query:!!u.search,approved_host:u.hostname==='api.chattanoogashooting.com'},note:'No download attempted. Share only this diagnostic metadata with support; never share the signed feed URL.'});
+      }
       step='downloading CSV header';
       const controller=new AbortController();
       const timer=setTimeout(()=>controller.abort(),12000);
