@@ -285,8 +285,9 @@ export function createChattanoogaRouter(pool) {
     const attentionFilters={
       pending:"status='draft' AND review_status='pending'",
       missing_image:"status='draft' AND (image_url IS NULL OR image_url='')",
-      map_unverified:"status='draft' AND map_cents IS NULL",
-      zero_stock:"status='draft' AND available_quantity=0",
+      map_unverified:"status='draft' AND (map_cents IS NULL OR map_cents<0)",
+      zero_stock:"status='draft' AND (available_quantity IS NULL OR available_quantity<=0)",
+      stale_stock:"status='draft' AND (last_synced_at IS NULL OR last_synced_at<now()-interval '24 hours')",
       approved:"status='draft' AND review_status='approved'",
       rejected:"status='draft' AND review_status='rejected'"
     };
