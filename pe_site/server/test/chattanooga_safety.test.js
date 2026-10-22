@@ -68,4 +68,5 @@ test('FFL eligibility requires both explicit positive on-file and negative opt-o
   assert.equal(check('1','false').eligible_for_supplier_drop_ship,false);
   assert.throws(()=>evaluateFflStatus({federal_firearms_licenses:[]},ffl_number));
   assert.throws(()=>evaluateFflStatus({federal_firearms_licenses:[{ffl_number:'999999999999999'}]},ffl_number));
+  assert.throws(()=>evaluateFflStatus({federal_firearms_licenses:[{ffl_number:'bad'}]},ffl_number),e=>e.status===502);
 });
