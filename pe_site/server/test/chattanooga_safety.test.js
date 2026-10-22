@@ -101,3 +101,16 @@ test('supplier malformed HTTP response fails closed',async()=>{
   const client=createChattanoogaClient({sid:'test',token:'test',fetchImpl:async()=>({status:200})});
   await assert.rejects(client.getItems({page:1}),e=>e.status===502);
 });
+
+test('supplier API calls refuse redirects and use only GET',async()=>{
+  const calls=[];
+  const client=createChattanoogaClient({sid:'test',token:'test',fetchImpl:async(url,opts)=>{
+    calls.push({url:String(url),method:opts.method,redirect:opts.redirect});
+    return {ok:true,status:200,json:async()=>({items:[]})};
+  }});
+  await client.getItems({page:1});
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].method,'GET');
+  assert.equal(calls[0].redirect,'error');
+  assert.match(calls[0].url,/^https:\/\/api\.chattanoogashooting\.com\/rest\/v6\/items\?/);
+});
