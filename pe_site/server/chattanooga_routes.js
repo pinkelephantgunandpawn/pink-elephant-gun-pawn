@@ -242,7 +242,7 @@ export function createChattanoogaRouter(pool) {
     const where=["supplier='chattanooga'"],values=[];
     if(req.query.category){values.push(text(req.query.category,80));where.push(`category=$${values.length}`);}
     if(allowed.includes(req.query.status)){values.push(req.query.status);where.push(`status=$${values.length}`);}
-    if(req.query.search){values.push('%'+text(req.query.search,100)+'%');where.push(`(title ILIKE $${values.length} OR sku ILIKE $${values.length} OR brand ILIKE $${values.length} OR upc ILIKE $${values.length})`);}
+    if(req.query.search){values.push('%'+text(req.query.search,100).replace(/[\\%_]/g,'\\$&')+'%');where.push(`(title ILIKE $${values.length} OR sku ILIKE $${values.length} OR brand ILIKE $${values.length} OR upc ILIKE $${values.length})`);}
     const attention=typeof req.query.attention==='string'?req.query.attention.slice(0,32):'';
     const attentionFilters={
       pending:"status='draft' AND review_status='pending'",
