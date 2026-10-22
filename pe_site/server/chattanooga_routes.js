@@ -441,6 +441,25 @@ export function createChattanoogaRouter(pool) {
         warning:'Local inventory snapshots cannot confirm current availability or reserved stock. Do not use as an order approval.'});
     }catch(e){fail(res,e);}
   });
+  // Read-only operational checklist for a supplier-coordinated test. No test
+  // shipment or supplier API request is ever initiated by this endpoint.
+  router.get('/test-order-checklist',(_req,res)=>{
+    res.set('Cache-Control','no-store');
+    res.json({
+      test_submission_enabled:false,
+      prerequisites:[
+        {key:'sales_rep_acknowledgment',label:'Text Chattanooga sales representative and obtain acknowledgment before submitting a test',complete:false},
+        {key:'api_order_schema',label:'Verify exact V6 order creation fields, authentication, and supported test notation',complete:false},
+        {key:'receiving_ffl',label:'For firearms, verify receiving FFL number and PDF/JPG license document',complete:false},
+        {key:'order_separation',label:'Separate handgun, long gun, and non-FFL items into distinct supplier orders',complete:false},
+        {key:'availability',label:'Confirm supplier allocation and current stock before test',complete:false},
+        {key:'costs',label:'Review freight, insurance, minimum order fees, tax and possible real charges',complete:false},
+        {key:'test_label',label:'Mark supplier order note or PO as TEST if approved by representative',complete:false},
+        {key:'explicit_approval',label:'Obtain explicit owner authorization for a specific coordinated test order',complete:false}
+      ],
+      warning:'The supplier has no sandbox. A TEST note alone does not guarantee no charge or shipment. No orders are sent from this integration.'
+    });
+  });
   // No live ordering: give managers a private, local-only checklist of
   // drafts that pass basic data checks. This is NOT a launch authorization.
   router.get('/candidate-summary',async(_req,res)=>{
