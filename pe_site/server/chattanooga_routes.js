@@ -422,6 +422,16 @@ export function createChattanoogaRouter(pool) {
         const sku=skus[i],matches=bySku.get(sku)||[],issues=[];
         if(matches.length===0)issues.push('Not found in local staged catalog');
         if(matches.length>1)issues.push('Duplicate local SKU');
+        // An explicit proposed kind is optional, but when provided it must agree
+        // with the supplier's broad catalog category. Handgun versus long gun
+        // still requires a separate verified classification.
+        if(line.kind!==undefined){
+          if(!['handgun','long_gun','optics'].includes(line.kind))issues.push('Invalid proposed product type');
+          else if(matches.length===1){
+            const expected=line.kind==='optics'?'Optics':'Firearms';
+            if(matches[0].category!==expected)issues.push('Proposed product type conflicts with local supplier category');
+          }
+        }
         if(matches.length===1){
           const x=matches[0];
           if(x.status!=='draft')issues.push('Not an unpublished draft');
