@@ -261,7 +261,8 @@ export function createChattanoogaRouter(pool) {
         firearm_shipping_rules:'separate_firearms_from_non_ffl_and_handguns_from_long_guns',
         dropship_fees_and_restrictions:'fulfillment_agreement_received_2026_10_16_rates_subject_to_change',
         api_order_testing:'coordinate_with_sales_rep_before_real_test_order',
-        supplier_ffl_lookup:'supplier_confirms_lookup_and_upload_endpoints_schema_not_implemented',
+        supplier_ffl_lookup:'v6_read_only_lookup_implemented_document_upload_disabled',
+        supplier_order_schema:'v6_documentation_received_order_submission_disabled',
         allocated_inventory:'requires_supplier_verification'
       },
       fulfillment_agreement:{
@@ -277,6 +278,7 @@ export function createChattanoogaRouter(pool) {
         restocking_fee_percent:15,
         rates_subject_to_change:true,
         ffl_document_formats:['pdf','jpg'],
+        v6_ffl_upload_document_formats:['pdf','jpg','jpeg','png'],
         mixed_firearm_non_ffl_order_allowed:false,
         mixed_handgun_long_gun_order_allowed:false,
         same_day_eligibility_cutoff:'12:00 PM EST (not guaranteed)',
