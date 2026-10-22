@@ -133,9 +133,9 @@ export function createChattanoogaRouter(pool) {
       const data=await client().getItems({item_ids:supplierId});
       const ref=await referenceFor(supplierId);const item=list(data).map(x=>normalize(x,ref)).find(x=>x?.id===supplierId);
       if(!item)return res.status(422).json({error:'Supplier item unavailable or outside firearms/optics scope; draft left unchanged'});
-      const {rows}=await pool.query(`UPDATE distributor_catalog SET title=$2,category=$3,brand=$4,sku=$5,upc=$6,description=$7,image_url=$8,cost_cents=$9,available_quantity=$10,raw_data=$11,last_synced_at=now(),updated_at=now()
+      const {rows}=await pool.query(`UPDATE distributor_catalog SET title=$2,category=$3,brand=$4,sku=$5,upc=$6,description=$7,image_url=$8,cost_cents=$9,available_quantity=$10,raw_data=$11,map_cents=$12,last_synced_at=now(),updated_at=now()
         WHERE id=$1 AND supplier='chattanooga' AND status='draft' RETURNING id,title,category,image_url,available_quantity,last_synced_at`,
-        [req.params.id,item.title,item.category,item.brand,item.sku,item.upc,item.description,item.image_url,item.cost_cents,item.quantity,JSON.stringify(item.raw)]);
+        [req.params.id,item.title,item.category,item.brand,item.sku,item.upc,item.description,item.image_url,item.cost_cents,item.quantity,JSON.stringify(item.raw),item.map_cents]);
       if(!rows.length)return res.status(409).json({error:'Draft changed; refresh not applied'});
       res.set('Cache-Control','no-store');res.json({...rows[0],published:false});
     }catch(e){res.status(502).json({error:'Supplier refresh failed; existing draft retained'});}
@@ -161,8 +161,8 @@ export function createChattanoogaRouter(pool) {
     if(req.query.search){values.push('%'+text(req.query.search,100)+'%');where.push(`(title ILIKE $${values.length} OR sku ILIKE $${values.length} OR brand ILIKE $${values.length} OR upc ILIKE $${values.length})`);}
     const limit=bounded(req.query.limit,50,100),offset=(bounded(req.query.page,1,100000)-1)*limit;
     values.push(limit,offset);
-    const {rows}=await pool.query(`SELECT id,supplier_item_id,title,category,brand,sku,upc,description,image_url,cost_cents,available_quantity,markup_percent,price_override_cents,status,review_status,reviewed_at,inventory_id,last_synced_at FROM distributor_catalog WHERE ${where.join(' AND ')} ORDER BY category,title LIMIT $${values.length-1} OFFSET $${values.length}`,values);
-    res.json(rows.map(x=>({...x,retail_price_cents:retailPriceCents(x.cost_cents,Number(x.markup_percent),x.price_override_cents)})));
+    const {rows}=await pool.query(`SELECT id,supplier_item_id,title,category,brand,sku,upc,description,image_url,cost_cents,map_cents,available_quantity,markup_percent,price_override_cents,status,review_status,reviewed_at,inventory_id,last_synced_at FROM distributor_catalog WHERE ${where.join(' AND ')} ORDER BY category,title LIMIT $${values.length-1} OFFSET $${values.length}`,values);
+    res.json(rows.map(x=>({...x,retail_price_cents:Math.max(retailPriceCents(x.cost_cents,Number(x.markup_percent),x.price_override_cents),x.map_cents??0)})));
   }catch(e){fail(res,e);}});
   router.post('/stage',async(req,res)=>{const raw=Array.isArray(req.body?.items)?req.body.items:[];
     if(!raw.length||raw.length>10)return res.status(400).json({error:'Select 1–10 products per batch'});
@@ -179,12 +179,12 @@ export function createChattanoogaRouter(pool) {
       }
     }catch(e){return res.status(502).json({error:'Supplier verification unavailable; nothing staged'});}
     const db=await pool.connect();try{await db.query('BEGIN');
-      for(const x of normalized){await db.query(`INSERT INTO distributor_catalog(supplier_item_id,title,category,brand,sku,upc,description,image_url,cost_cents,available_quantity,raw_data,last_synced_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+      for(const x of normalized){await db.query(`INSERT INTO distributor_catalog(supplier_item_id,title,category,brand,sku,upc,description,image_url,cost_cents,available_quantity,raw_data,map_cents,last_synced_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
         ON CONFLICT(supplier,supplier_item_id) DO UPDATE SET
         title=EXCLUDED.title,category=EXCLUDED.category,brand=EXCLUDED.brand,sku=EXCLUDED.sku,upc=EXCLUDED.upc,description=EXCLUDED.description,
         image_url=EXCLUDED.image_url,cost_cents=EXCLUDED.cost_cents,available_quantity=EXCLUDED.available_quantity,
-        raw_data=EXCLUDED.raw_data,last_synced_at=now(),updated_at=now()`,[x.id,x.title,x.category,x.brand,x.sku,x.upc,x.description,x.image_url,x.cost_cents,x.quantity,JSON.stringify(x.raw)]);}
+        raw_data=EXCLUDED.raw_data,map_cents=EXCLUDED.map_cents,last_synced_at=now(),updated_at=now()`,[x.id,x.title,x.category,x.brand,x.sku,x.upc,x.description,x.image_url,x.cost_cents,x.quantity,JSON.stringify(x.raw),x.map_cents]);}
       await db.query('COMMIT');res.json({staged:normalized.length});
     }catch(e){await db.query('ROLLBACK');fail(res,e);}finally{db.release();}
   });
@@ -193,6 +193,13 @@ export function createChattanoogaRouter(pool) {
     if(markup_percent===undefined&&price_override_cents===undefined)return res.status(400).json({error:'No changes supplied'});
     if(markup_percent!==undefined&&(!Number.isFinite(markup_percent)||markup_percent<0||markup_percent>500))return res.status(400).json({error:'Invalid markup'});
     if(price_override_cents!==undefined&&price_override_cents!==null&&(!Number.isSafeInteger(price_override_cents)||price_override_cents<0))return res.status(400).json({error:'Invalid override'});
+    if(price_override_cents!==undefined&&price_override_cents!==null){
+      try{
+        const {rows}=await pool.query("SELECT map_cents FROM distributor_catalog WHERE id=$1 AND supplier='chattanooga'",[req.params.id]);
+        if(!rows.length)return res.status(404).json({error:'Not found'});
+        if(rows[0].map_cents!==null&&price_override_cents<rows[0].map_cents)return res.status(422).json({error:'Override below supplier MAP'});
+      }catch(e){return fail(res,e);}
+    }
     try{const {rows}=await pool.query(`UPDATE distributor_catalog SET markup_percent=COALESCE($2,markup_percent),price_override_cents=CASE WHEN $3 THEN $4 ELSE price_override_cents END,updated_at=now() WHERE id=$1 RETURNING id,status`,[req.params.id,markup_percent??null,price_override_cents!==undefined,price_override_cents??null]);if(!rows.length)return res.status(404).json({error:'Not found'});res.json(rows[0]);}catch(e){fail(res,e);}
   });
   // Publishing stays disabled until cost semantics, MAP and shipping restrictions are verified.
