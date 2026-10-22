@@ -11,7 +11,29 @@ let page=1,remote=[],selected=new Set();
 async function api(path,options={}){const r=await fetch(API+path,{...options,headers:{'Content-Type':'application/json',Authorization:'Bearer '+token,...options.headers}});const data=await r.json();if(!r.ok)throw Error(data.error||'Request failed');return data;}
 const msg=(s,bad=false)=>{$('message').textContent=s;$('message').style.color=bad?'#ff9696':'#8de6a4';};
 function cardImage(url){try{const u=new URL(url);if(['https:','http:'].includes(u.protocol))return '<img loading="lazy" src="'+escapeHtml(u.href)+'" alt="Product image" onerror="this.replaceWith(document.createTextNode(\'Image coming soon\'))">';}catch{}return '<p class="muted">Image coming soon</p>';}
-async function loadRemote(){try{msg('');const result=await api('/api/admin/chattanooga/remote?page='+page+'&per_page=50');remote=result.normalized||[];remote=remote.map(p=>({...p}));$('page').textContent='Page '+page;$('connection').textContent=remote.length+' eligible firearms/optics among '+(result.supplier_count??'the')+' supplier items on this page. Use Next page to browse.';$('remote').innerHTML=remote.map((x,i)=>'<div class="product"><div class="row"><label><input type="checkbox" data-select="'+i+'" '+(selected.has(x.id)?'checked':'')+'> Select</label><span class="tag">'+escapeHtml(x.category)+'</span></div>'+cardImage(x.image_url)+'<h3>'+escapeHtml(x.title)+'</h3><p class="muted">'+escapeHtml(x.brand)+' · '+escapeHtml(x.sku)+'</p><p>Cost $'+(x.cost_cents/100).toFixed(2)+' · Suggested retail ||'<p>No eligible firearms or optics in this batch of supplier records. Try Next page.</p>';}catch(e){msg(e.message,true);$('connection').textContent='Unable to load distributor catalog';}}
+async function loadRemote(){
+  try{
+    msg('');
+    const result=await api('/api/admin/chattanooga/remote?page='+page+'&per_page=50');
+    remote=result.normalized||[];
+    $('page').textContent='Page '+page;
+    $('connection').textContent=remote.length+' eligible products among '+(result.supplier_count||0)+' supplier items on this page.';
+    const root=$('remote');root.replaceChildren();
+    for(const [i,x] of remote.entries()){
+      const card=document.createElement('div');card.className='product';
+      const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.dataset.select=String(i);checkbox.checked=selected.has(x.id);
+      const label=document.createElement('label');label.append(checkbox,document.createTextNode(' Select'));
+      const heading=document.createElement('h3');heading.textContent=x.title||'Untitled';
+      const details=document.createElement('p');details.textContent=(x.category||'')+' | '+(x.brand||'')+' | '+(x.sku||'');
+      const cost=document.createElement('p');cost.textContent='Cost: $'+(Number(x.cost_cents||0)/100).toFixed(2);
+      const suggested=document.createElement('p');suggested.textContent='Suggested retail: $'+(Math.max(Math.round(Number(x.cost_cents||0)*1.2),Number(x.map_cents||0))/100).toFixed(2);
+      const stock=document.createElement('p');stock.textContent='Supplier quantity: '+(x.quantity??0);
+      card.append(label,heading,details,cost,suggested,stock);root.append(card);
+      if(x.image_url){const img=document.createElement('img');img.src=x.image_url;img.alt='Product image';img.onerror=()=>img.remove();card.insertBefore(img,heading);}
+    }
+    if(!remote.length){const p=document.createElement('p');p.textContent='No eligible firearms or optics in this batch. Try Next page.';root.append(p);}
+  }catch(e){msg(e.message,true);$('connection').textContent='Unable to load distributor catalog';}
+}
 $('remote').addEventListener('change',e=>{if(e.target.dataset.select!==undefined){const x=remote[Number(e.target.dataset.select)];if(e.target.checked)selected.add(x.id);else selected.delete(x.id);}});
 $('all').onchange=e=>{remote.forEach(x=>e.target.checked?selected.add(x.id):selected.delete(x.id));loadRemoteView();};
 function loadRemoteView(){document.querySelectorAll('[data-select]').forEach(el=>el.checked=selected.has(remote[Number(el.dataset.select)]?.id));}
