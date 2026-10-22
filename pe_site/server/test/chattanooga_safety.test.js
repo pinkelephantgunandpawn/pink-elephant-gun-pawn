@@ -70,3 +70,8 @@ test('FFL eligibility requires both explicit positive on-file and negative opt-o
   assert.throws(()=>evaluateFflStatus({federal_firearms_licenses:[{ffl_number:'999999999999999'}]},ffl_number));
   assert.throws(()=>evaluateFflStatus({federal_firearms_licenses:[{ffl_number:'bad'}]},ffl_number),e=>e.status===502);
 });
+
+test('supplier network failures are sanitized and do not expose transport details',async()=>{
+  const client=createChattanoogaClient({sid:'test',token:'test',fetchImpl:async()=>{throw new Error('private upstream URL or token');}});
+  await assert.rejects(client.getItems({page:1}),e=>e.status===502&&!e.message.includes('private upstream'));
+});
