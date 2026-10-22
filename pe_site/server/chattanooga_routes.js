@@ -1,10 +1,12 @@
 import { Router } from 'express';
+import { attachChattanoogaReferenceRoutes } from './chattanooga_reference.js';
 import { createChattanoogaClient } from './chattanooga_client.js';
 import { retailPriceCents, parseSupplierMoneyCents } from './chattanooga_pricing.js';
 
 // All routes MUST be mounted behind the application's existing auth and manager role middleware.
 export function createChattanoogaRouter(pool) {
   const router=Router();
+  attachChattanoogaReferenceRoutes(router,pool);
   const allowed=['draft','published','hidden'];
   const fail=(res,e)=>{console.error('Chattanooga admin request:',e?.message);res.status(500).json({error:'Distributor operation failed'});};
   const client=()=>createChattanoogaClient();
@@ -40,24 +42,35 @@ export function createChattanoogaRouter(pool) {
     }
     return '';
   };
-  const normalize=(x)=>{
+  const normalize=(x,reference=null)=>{
     const id=text(x.cssi_id??x.item_id??x.itemId??x.id??x.sku,120);
     const title=text(x.name??x.title??x.description,180);
     if(!id||!title) return null;
     // Exact dealer-portal-verified firearm; never infer firearm status from arbitrary numeric flags.
     const verifiedCategory=id==='TX1GX293110EN1'?'Firearms':null;
-    const catalogCategory=verifiedCategory??scope(x);if(!catalogCategory)return null;
+    const catalogCategory=reference?.category??verifiedCategory??scope(x);if(!catalogCategory)return null;
     const rawCost=x.drop_ship_price??x.cost??x.dealer_price??x.wholesale_price??x.unit_cost;
     if(rawCost===undefined||rawCost===null)return null;
     let costCents;try{costCents=money(rawCost);}catch{return null;}
     const mapRaw=x.retail_map_price;
     let mapCents=null;
     if(mapRaw!==undefined&&mapRaw!==null&&String(mapRaw).trim()!==''){try{mapCents=money(mapRaw);}catch{mapCents=null;}}
-    return {id,title,category:catalogCategory,
-      brand:text(x.manufacturer??x.brand,120),sku:text(x.sku??x.cssi_id??x.item_id??id,80),upc:text(x.upc??x.upc_code,80),
-      description:text(x.long_description??x.product_description??x.description??'',4000),
+    if(mapCents===null&&reference?.map_cents!==null&&reference?.map_cents!==undefined)mapCents=Number(reference.map_cents);
+    return {id,title:reference?.reference_title||title,category:catalogCategory,
+      brand:text(x.manufacturer??x.brand??reference?.manufacturer,120),sku:text(x.sku??x.cssi_id??x.item_id??id,80),upc:text(x.upc??x.upc_code??reference?.upc,80),
+      description:text(x.long_description??x.product_description??x.description??reference?.reference_title??'',4000),
       image_url:imageUrl(x),
       map_cents:mapCents,cost_cents:costCents,quantity:Math.max(0,Math.floor(Number(x.inventory??x.quantity_available??x.available_quantity??x.quantity??x.qty??0)||0)),raw:x};
+  };
+  const referenceFor=async(id)=>{
+    const {rows}=await pool.query('SELECT category,reference_title,manufacturer,upc,map_cents FROM chattanooga_reference WHERE supplier_item_id=$1',[id]);
+    return rows[0]??null;
+  };
+  const referencesFor=async(items)=>{
+    const ids=items.map(x=>text(x.cssi_id??x.item_id??x.itemId??x.id??x.sku,120)).filter(Boolean);
+    if(!ids.length)return new Map();
+    const {rows}=await pool.query('SELECT supplier_item_id,category,reference_title,manufacturer,upc,map_cents FROM chattanooga_reference WHERE supplier_item_id=ANY($1::text[])',[ids]);
+    return new Map(rows.map(x=>[x.supplier_item_id,x]));
   };
   router.get('/health',(_req,res)=>res.json({configured:!!(process.env.CHATTANOOGA_SID&&process.env.CHATTANOOGA_TOKEN),version:'v6',default_markup:20,ordering_enabled:false}));
   router.get('/field-diagnostics',async(_req,res)=>{try{
@@ -78,7 +91,7 @@ export function createChattanoogaRouter(pool) {
       const items=list(data);
       const item=items.find(x=>String(x.cssi_id??x.item_id??x.sku??'').toUpperCase()===sku.toUpperCase());
       if(!item)return res.status(404).json({error:'Supplier SKU not found'});
-      const normalized=normalize(item);
+      const normalized=normalize(item,await referenceFor(sku));
       const keys=Object.keys(item).sort();
       res.set('Cache-Control','no-store');
       res.json({sku,found:true,title:text(item.name??item.title,180),serialized_flag:item.serialized_flag===true||item.serialized_flag===1||item.serialized_flag==='1',
@@ -97,7 +110,7 @@ export function createChattanoogaRouter(pool) {
       const data=await client().getItems({item_ids:sku});
       const item=list(data).find(x=>String(x.cssi_id??x.item_id??x.sku??'').toUpperCase()===sku.toUpperCase());
       if(!item)return res.status(404).json({error:'Supplier item not found'});
-      const product=normalize(item);
+      const product=normalize(item,await referenceFor(sku));
       if(!product)return res.status(422).json({error:'Item not verified as firearm or optic, or supplier cost unavailable'});
       const {raw,...preview}=product;
       res.set('Cache-Control','no-store');res.json({product:preview,publishing_enabled:false});
@@ -108,7 +121,7 @@ export function createChattanoogaRouter(pool) {
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
     const data=await client().getItems({page,per_page});
     res.set('Cache-Control','no-store');
-    const supplierItems=list(data);res.json({normalized:supplierItems.map(normalize).filter(Boolean).map(({raw,...item})=>item),page,per_page,supplier_count:supplierItems.length});
+    const supplierItems=list(data);const refs=await referencesFor(supplierItems);res.json({normalized:supplierItems.map(x=>normalize(x,refs.get(text(x.cssi_id??x.item_id??x.itemId??x.id??x.sku,120)))).filter(Boolean).map(({raw,...item})=>item),page,per_page,supplier_count:supplierItems.length});
   }catch(e){res.status(e.status===401?502:502).json({error:'Chattanooga catalog unavailable',code:e.code??null});}});
   // Read-only refresh of one staged SKU. Never publishes or modifies storefront inventory.
   router.post('/products/:id/refresh',async(req,res)=>{
@@ -118,7 +131,7 @@ export function createChattanoogaRouter(pool) {
       if(existing.rows[0].status!=='draft')return res.status(409).json({error:'Only draft supplier records may be refreshed'});
       const supplierId=existing.rows[0].supplier_item_id;
       const data=await client().getItems({item_ids:supplierId});
-      const item=list(data).map(normalize).find(x=>x?.id===supplierId);
+      const ref=await referenceFor(supplierId);const item=list(data).map(x=>normalize(x,ref)).find(x=>x?.id===supplierId);
       if(!item)return res.status(422).json({error:'Supplier item unavailable or outside firearms/optics scope; draft left unchanged'});
       const {rows}=await pool.query(`UPDATE distributor_catalog SET title=$2,category=$3,brand=$4,sku=$5,upc=$6,description=$7,image_url=$8,cost_cents=$9,available_quantity=$10,raw_data=$11,last_synced_at=now(),updated_at=now()
         WHERE id=$1 AND supplier='chattanooga' AND status='draft' RETURNING id,title,category,image_url,available_quantity,last_synced_at`,
@@ -160,7 +173,7 @@ export function createChattanoogaRouter(pool) {
     try {
       for(const id of requestedIds){
         const result=await client().getItems({item_ids:id});
-        const item=list(result).map(normalize).find(x=>x?.id===id);
+        const ref=await referenceFor(id);const item=list(result).map(x=>normalize(x,ref)).find(x=>x?.id===id);
         if(!item)return res.status(422).json({error:'Product is not a verified firearm/optic or supplier cost and stock could not be confirmed',item_id:id});
         normalized.push(item);
       }
