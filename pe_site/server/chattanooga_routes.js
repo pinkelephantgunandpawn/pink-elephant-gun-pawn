@@ -240,6 +240,7 @@ export function createChattanoogaRouter(pool) {
         firearm_shipping_rules:'separate_firearms_from_non_ffl_and_handguns_from_long_guns',
         dropship_fees_and_restrictions:'fulfillment_agreement_received_2026_10_16_rates_subject_to_change',
         api_order_testing:'coordinate_with_sales_rep_before_real_test_order',
+        supplier_ffl_lookup:'supplier_confirms_lookup_and_upload_endpoints_schema_not_implemented',
         allocated_inventory:'requires_supplier_verification'
       },
       fulfillment_agreement:{
@@ -474,6 +475,7 @@ export function createChattanoogaRouter(pool) {
         {key:'sales_rep_acknowledgment',label:'Text Chattanooga sales representative and obtain acknowledgment before submitting a test',complete:false},
         {key:'api_order_schema',label:'Verify exact V6 order creation fields, authentication, and supported test notation',complete:false},
         {key:'receiving_ffl',label:'For firearms, verify receiving FFL number and PDF/JPG license document',complete:false},
+        {key:'supplier_ffl_lookup',label:'Use the documented Chattanooga FFL lookup to confirm dealer is on file; upload missing FFL only after reviewing exact API schema and license',complete:false},
         {key:'order_separation',label:'Separate handgun, long gun, and non-FFL items into distinct supplier orders',complete:false},
         {key:'availability',label:'Confirm supplier allocation and current stock before test',complete:false},
         {key:'costs',label:'Review freight, insurance, minimum order fees, tax and possible real charges',complete:false},
