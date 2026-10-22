@@ -9,7 +9,7 @@ const cols=['CSSI Item Number','Product Type','Supplier Category','Web Item Name
 const money=s=>{
   const value=String(s??'').trim();
   if(!value||value==='-')return null;
-  if(!/^\\$?\\d{1,7}(?:\\.\\d{1,2})?$/.test(value))return null;
+  if(!/^\$?\d{1,7}(?:\.\d{1,2})?$/.test(value))return null;
   return Math.round(Number(value.replace('$',''))*100);
 };
 export function attachChattanoogaReferenceRoutes(router,pool){
@@ -21,12 +21,12 @@ export function attachChattanoogaReferenceRoutes(router,pool){
   });
   router.post('/reference/upload',upload.single('file'),async(req,res)=>{
     if(!req.file)return res.status(400).json({error:'Upload the filtered firearms/optics CSV'});
-    if(!/\\.csv$/i.test(req.file.originalname))return res.status(400).json({error:'CSV only'});
+    if(!/\.csv$/i.test(req.file.originalname))return res.status(400).json({error:'CSV only'});
     let count=0;
     const seen=new Set(),items=[];
     try{
       await new Promise((resolve,reject)=>{
-        Readable.from(req.file.buffer).pipe(csv({strict:true,mapHeaders:({header})=>header.replace(/^\\uFEFF/,'').trim()}))
+        Readable.from(req.file.buffer).pipe(csv({strict:true,mapHeaders:({header})=>header.replace(/^\uFEFF/,'').trim()}))
           .on('headers',headers=>{if(cols.some(col=>!headers.includes(col)))reject(new Error('Expected filtered CSV columns'));})
           .on('data',row=>{
             const id=String(row['CSSI Item Number']??'').trim();
