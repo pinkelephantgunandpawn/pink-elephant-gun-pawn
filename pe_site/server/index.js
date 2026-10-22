@@ -147,6 +147,11 @@ async function migrateImagesToR2(){
 }
 
 app.set('trust proxy', 1);
+// Admin HTML must never be cached by browsers or intermediary CDNs.
+app.get('/chattanooga.html',(_req,res)=>{
+  res.set({'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'});
+  res.sendFile(path.join(__dirname,'..','chattanooga.html'));
+});
 app.use(express.static(path.join(__dirname,'..')));
 app.get('/', (_req,res)=>res.sendFile(path.join(__dirname,'..','index.html')));
 app.get('/admin', (_req,res)=>res.sendFile(path.join(__dirname,'..','admin.html')));
