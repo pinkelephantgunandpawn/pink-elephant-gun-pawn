@@ -373,6 +373,32 @@ export function createChattanoogaRouter(pool) {
       proposed_groups:Object.entries(groups).filter(([,n])=>n>0).map(([kind,quantity])=>({kind,quantity})),
       supplier_api_payload_generated:false,supplier_order_created:false,checkout_enabled:false});
   });
+  // Read-only local SKU check. This cannot verify real-time supplier allocation.
+  router.get('/sku-readiness',async(req,res)=>{
+    const sku=typeof req.query.sku==='string'?req.query.sku.trim():'';
+    if(!sku||sku.length>80)return res.status(400).json({error:'A supplier SKU of up to 80 characters is required'});
+    try{
+      const {rows}=await pool.query(`SELECT sku,title,category,status,review_status,map_cents,
+        image_url,available_quantity,last_synced_at
+        FROM distributor_catalog WHERE supplier='chattanooga' AND sku=$1
+          AND category IN ('Firearms','Optics') ORDER BY updated_at DESC LIMIT 2`,[sku]);
+      if(!rows.length)return res.status(404).json({error:'SKU is not present in the local Chattanooga draft catalog'});
+      if(rows.length>1)return res.status(409).json({error:'Duplicate supplier SKU in local catalog; manual review required'});
+      const x=rows[0],issues=[];
+      if(x.status!=='draft')issues.push('Not a draft');
+      if(x.review_status!=='approved')issues.push('Not approved for internal review');
+      if(x.map_cents===null||x.map_cents<0)issues.push('MAP unverified');
+      if(!x.image_url)issues.push('Product image missing');
+      if(x.available_quantity===null||x.available_quantity<=0)issues.push('No reported supplier stock');
+      if(!x.last_synced_at||Date.now()-new Date(x.last_synced_at).getTime()>86400000)issues.push('Inventory snapshot older than 24 hours');
+      res.set('Cache-Control','no-store');
+      res.json({sku:x.sku,title:x.title,category:x.category,review_status:x.review_status,
+        reported_quantity:x.available_quantity,last_refreshed:x.last_synced_at,
+        passes_local_data_checks:issues.length===0,issues,
+        live_inventory_verified:false,allocation_verified:false,eligible_for_checkout:false,eligible_for_order_submission:false,
+        note:'Local snapshot only. Passing checks does not authorize listing, checkout or supplier order.'});
+    }catch(e){fail(res,e);}
+  });
   // No live ordering: give managers a private, local-only checklist of
   // drafts that pass basic data checks. This is NOT a launch authorization.
   router.get('/candidate-summary',async(_req,res)=>{
