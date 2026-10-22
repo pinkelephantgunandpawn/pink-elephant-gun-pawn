@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { draftAdvertisedPrice, retailPriceCents, parseSupplierMoneyCents } from '../chattanooga_pricing.js';
-import { createChattanoogaClient, validateItemsParams, validateProductFeedParams } from '../chattanooga_client.js';
+import { createChattanoogaClient, validateItemsParams, validateProductFeedParams, normalizeFflNumber } from '../chattanooga_client.js';
 
 test('advertised price never falls below a verified MAP',()=>{
   const x=draftAdvertisedPrice({costCents:10000,mapCents:15000,markupPercent:20});
@@ -38,5 +38,21 @@ test('supplier client allows GET items but never POST or order endpoints',async(
   assert.equal(calls.length,1);
   assert.equal(calls[0].method,'GET');
   assert.match(calls[0].url,/\/rest\/v6\/items\?/);
+  assert.equal('createOrder' in client,false);
+});
+
+test('FFL number normalization accepts documented format',()=>{
+  assert.equal(normalizeFflNumber('12-233-3445A66666'),'122333445A66666');
+  for(const value of ['123','1234567890123456','not a license',''])assert.throws(()=>normalizeFflNumber(value));
+});
+test('FFL status lookup uses GET and does not enable supplier writes',async()=>{
+  const calls=[];
+  const client=createChattanoogaClient({sid:'test',token:'test',fetchImpl:async(url,opts)=>{
+    calls.push({url:String(url),method:opts.method});
+    return {ok:true,status:200,json:async()=>({federal_firearms_licenses:[]})};
+  }});
+  await client.getFflStatus('122333445A66666');
+  assert.equal(calls[0].method,'GET');
+  assert.match(calls[0].url,/federal-firearms-licenses\/122333445A66666$/);
   assert.equal('createOrder' in client,false);
 });
