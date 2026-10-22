@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { attachChattanoogaReferenceRoutes } from './chattanooga_reference.js';
 import { createChattanoogaClient } from './chattanooga_client.js';
-import { retailPriceCents, parseSupplierMoneyCents } from './chattanooga_pricing.js';
+import { retailPriceCents, parseSupplierMoneyCents, draftAdvertisedPrice } from './chattanooga_pricing.js';
 
 // All routes MUST be mounted behind the application's existing auth and manager role middleware.
 export function createChattanoogaRouter(pool) {
@@ -198,6 +198,22 @@ export function createChattanoogaRouter(pool) {
       res.json({supplier_item_id:supplierId,reported_quantity:item.quantity,category:item.category,available_to_sell_verified:false,note:'Supplier quantity is informational, not a confirmed allocation or checkout reservation'});
     }catch(e){res.status(502).json({error:'Unable to verify supplier stock'});}
   });
+  // Database-only launch readiness summary. No supplier API calls and no storefront writes.
+  router.get('/readiness',async(_req,res)=>{
+    try{
+      const {rows}=await pool.query(`SELECT
+        count(*) FILTER (WHERE status='draft' AND category IN ('Firearms','Optics'))::int AS scoped_drafts,
+        count(*) FILTER (WHERE status='draft' AND category IN ('Firearms','Optics') AND review_status='approved')::int AS approved_drafts,
+        count(*) FILTER (WHERE status='draft' AND category IN ('Firearms','Optics') AND review_status='pending')::int AS pending_drafts,
+        count(*) FILTER (WHERE status='draft' AND category IN ('Firearms','Optics') AND (map_cents IS NULL))::int AS missing_map_verification,
+        count(*) FILTER (WHERE status='draft' AND category IN ('Firearms','Optics') AND (image_url IS NULL OR image_url=''))::int AS missing_images,
+        count(*) FILTER (WHERE status='draft' AND category IN ('Firearms','Optics') AND available_quantity=0)::int AS zero_reported_stock,
+        count(*) FILTER (WHERE status='published' AND category IN ('Firearms','Optics'))::int AS published_rows
+        FROM distributor_catalog WHERE supplier='chattanooga'`);
+      res.set('Cache-Control','no-store');
+      res.json({...rows[0],supplier_orders_enabled:false,automatic_publishing_enabled:false,stock_allocation_verified:false,ffl_fulfillment_verified:false,note:'Local draft snapshot only. Missing MAP does not necessarily mean no manufacturer MAP; allocation is not verified.'});
+    }catch(e){fail(res,e);}
+  });
   router.get('/categories',async(_req,res)=>{try{const {rows}=await pool.query("SELECT category,count(*)::int AS total,count(*) FILTER (WHERE status='draft')::int AS drafts,count(*) FILTER (WHERE status='published')::int AS published FROM distributor_catalog WHERE supplier='chattanooga' AND category IN ('Firearms','Optics') GROUP BY category ORDER BY category");res.json(rows);}catch(e){fail(res,e);}});
   router.get('/products',async(req,res)=>{try{
     const where=["supplier='chattanooga'"],values=[];
@@ -207,7 +223,7 @@ export function createChattanoogaRouter(pool) {
     const limit=bounded(req.query.limit,50,100),offset=(bounded(req.query.page,1,100000)-1)*limit;
     values.push(limit,offset);
     const {rows}=await pool.query(`SELECT id,supplier_item_id,title,category,brand,sku,upc,description,image_url,cost_cents,map_cents,available_quantity,markup_percent,price_override_cents,status,review_status,reviewed_at,inventory_id,last_synced_at FROM distributor_catalog WHERE ${where.join(' AND ')} ORDER BY category,title LIMIT $${values.length-1} OFFSET $${values.length}`,values);
-    res.json(rows.map(x=>({...x,retail_price_cents:Math.max(retailPriceCents(x.cost_cents,Number(x.markup_percent),x.price_override_cents),x.map_cents??0)})));
+    res.set('Cache-Control','no-store');res.json(rows.map(x=>{const p=draftAdvertisedPrice({costCents:x.cost_cents,mapCents:x.map_cents,markupPercent:Number(x.markup_percent),overrideCents:x.price_override_cents});return {...x,retail_price_cents:p.proposedCents,advertised_price_cents:p.advertisedCents,map_verified:p.mapVerified,below_map:p.belowMap,allocation_verified:false,launch_ready:false};}));
   }catch(e){fail(res,e);}});
   router.post('/stage',async(req,res)=>{const raw=Array.isArray(req.body?.items)?req.body.items:[];
     if(!raw.length||raw.length>10)return res.status(400).json({error:'Select 1–10 products per batch'});
@@ -238,14 +254,8 @@ export function createChattanoogaRouter(pool) {
     if(markup_percent===undefined&&price_override_cents===undefined)return res.status(400).json({error:'No changes supplied'});
     if(markup_percent!==undefined&&(!Number.isFinite(markup_percent)||markup_percent<0||markup_percent>500))return res.status(400).json({error:'Invalid markup'});
     if(price_override_cents!==undefined&&price_override_cents!==null&&(!Number.isSafeInteger(price_override_cents)||price_override_cents<0))return res.status(400).json({error:'Invalid override'});
-    if(price_override_cents!==undefined&&price_override_cents!==null){
-      try{
-        const {rows}=await pool.query("SELECT map_cents FROM distributor_catalog WHERE id=$1 AND supplier='chattanooga'",[req.params.id]);
-        if(!rows.length)return res.status(404).json({error:'Not found'});
-        if(rows[0].map_cents!==null&&price_override_cents<rows[0].map_cents)return res.status(422).json({error:'Override below supplier MAP'});
-      }catch(e){return fail(res,e);}
-    }
-    try{const {rows}=await pool.query(`UPDATE distributor_catalog SET markup_percent=COALESCE($2,markup_percent),price_override_cents=CASE WHEN $3 THEN $4 ELSE price_override_cents END,updated_at=now() WHERE id=$1 RETURNING id,status`,[req.params.id,markup_percent??null,price_override_cents!==undefined,price_override_cents??null]);if(!rows.length)return res.status(404).json({error:'Not found'});res.json(rows[0]);}catch(e){fail(res,e);}
+    // Overrides are private draft targets; the computed advertised price always floors at MAP.
+    try{const {rows}=await pool.query(`UPDATE distributor_catalog SET markup_percent=COALESCE($2,markup_percent),price_override_cents=CASE WHEN $3 THEN $4 ELSE price_override_cents END,updated_at=now() WHERE id=$1 AND supplier='chattanooga' AND status='draft' RETURNING id,status`,[req.params.id,markup_percent??null,price_override_cents!==undefined,price_override_cents??null]);if(!rows.length)return res.status(404).json({error:'Not found'});res.json(rows[0]);}catch(e){fail(res,e);}
   });
   // Publishing stays disabled until cost semantics, MAP and shipping restrictions are verified.
   // Admin approval is a separate explicit action and never implies publication.
