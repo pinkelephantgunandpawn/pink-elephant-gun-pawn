@@ -75,7 +75,10 @@ export function createChattanoogaRouter(pool) {
   router.get('/health',(_req,res)=>res.json({configured:!!(process.env.CHATTANOOGA_SID&&process.env.CHATTANOOGA_TOKEN),version:'v6',default_markup:20,ordering_enabled:false}));
   // Read-only product-feed diagnostic: fetch only a small prefix of the supplier CSV.
   // Never expose a signed feed URL, API credentials, or item records to the browser.
+  let feedInspectionCooldownUntil=0;
   router.get('/product-feed/diagnostics',async(_req,res)=>{
+    const remaining=Math.ceil((feedInspectionCooldownUntil-Date.now())/1000);
+    if(remaining>0)return res.status(429).json({error:'Chattanooga product-feed inspection is cooling down. Please wait about '+Math.ceil(remaining/60)+' minute(s) before trying again. No products changed.',retry_after_seconds:remaining});
     let step='requesting supplier feed';
     try{
       const feed=await client().getProductFeed({optional_columns:'retail_map,specifications',primary_image_only_flag:1});
@@ -112,7 +115,7 @@ export function createChattanoogaRouter(pool) {
         res.set('Cache-Control','no-store');
         res.json({column_count:columns.length,columns:columns.slice(0,150),image_columns:columns.filter(x=>/image|photo|picture|media|thumbnail/i.test(x)),map_columns:columns.filter(x=>/map|minimum.advertised/i.test(x)),stock_columns:columns.filter(x=>/inventory|stock|allocat|quantity/i.test(x)),notice:'Read-only column inspection. No CSV saved, products staged, or supplier orders submitted.'});
       }finally{clearTimeout(timer);}
-    }catch(e){console.error('Chattanooga product feed diagnostic:',e?.message);res.status(502).json({error:'Product-feed inspection failed at '+step+'. Supplier HTTP status: '+(Number.isInteger(e?.status)?e.status:'unknown')+'; supplier code: '+(e?.code===undefined||e?.code===null?'none':String(e.code).slice(0,32))+'. No products changed.'});}
+    }catch(e){if(e?.status===429||e?.code==='too-many-requests'){feedInspectionCooldownUntil=Date.now()+30*60*1000;res.set('Retry-After','1800');}console.error('Chattanooga product feed diagnostic:',e?.message);res.status(502).json({error:'Product-feed inspection failed at '+step+'. Supplier HTTP status: '+(Number.isInteger(e?.status)?e.status:'unknown')+'; supplier code: '+(e?.code===undefined||e?.code===null?'none':String(e.code).slice(0,32))+'. No products changed.'});}
   });
   router.get('/field-diagnostics',async(_req,res)=>{try{
     const data=await client().getItems({page:1,per_page:3});
