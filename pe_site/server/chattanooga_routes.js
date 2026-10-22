@@ -63,13 +63,13 @@ export function createChattanoogaRouter(pool) {
     res.json({sample_size:items.length,image_field_names:imageFields,category_field_names:categoryFields,eligible_count:items.map(normalize).filter(Boolean).length,notice:'Field names only; no credentials, supplier costs, or raw records exposed'});
   }catch(e){res.status(502).json({error:'Unable to inspect supplier field names'});}});
   router.get('/remote',async(req,res)=>{try{
-    const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,10,10);
+    const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,50,50);
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
     const data=await client().getItems({page,per_page});
     res.set('Cache-Control','no-store');
-    res.json({normalized:list(data).map(normalize).filter(Boolean).map(({raw,...item})=>item),page,per_page});
+    const supplierItems=list(data);res.json({normalized:supplierItems.map(normalize).filter(Boolean).map(({raw,...item})=>item),page,per_page,supplier_count:supplierItems.length});
   }catch(e){res.status(e.status===401?502:502).json({error:'Chattanooga catalog unavailable',code:e.code??null});}});
-  router.get('/categories',async(_req,res)=>{try{const {rows}=await pool.query("SELECT category,count(*)::int AS total,count(*) FILTER (WHERE status='draft')::int AS drafts,count(*) FILTER (WHERE status='published')::int AS published FROM distributor_catalog GROUP BY category ORDER BY category");res.json(rows);}catch(e){fail(res,e);}});
+  router.get('/categories',async(_req,res)=>{try{const {rows}=await pool.query("SELECT category,count(*)::int AS total,count(*) FILTER (WHERE status='draft')::int AS drafts,count(*) FILTER (WHERE status='published')::int AS published FROM distributor_catalog WHERE supplier='chattanooga' AND category IN ('Firearms','Optics') GROUP BY category ORDER BY category");res.json(rows);}catch(e){fail(res,e);}});
   router.get('/products',async(req,res)=>{try{
     const where=["supplier='chattanooga'"],values=[];
     if(req.query.category){values.push(text(req.query.category,80));where.push(`category=$${values.length}`);}
