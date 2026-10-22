@@ -229,6 +229,7 @@ export function createChattanoogaRouter(pool) {
   router.get('/review-export',async(req,res)=>{
     try{
       const {rows}=await pool.query("SELECT supplier_item_id,sku,upc,title,category,brand,status,review_status,map_cents,image_url,available_quantity,last_synced_at FROM distributor_catalog WHERE supplier='chattanooga' AND status='draft' AND category IN ('Firearms','Optics') ORDER BY category,title LIMIT 20000");
+      if(rows.length>=20000){res.set('Cache-Control','no-store');return res.status(409).json({error:'Draft export exceeds the safe 20,000-row limit. Narrow the catalog before exporting; no partial file was generated.'});}
       const header=['Supplier ID','SKU','UPC','Title','Category','Brand','Review status','MAP provided','Photo URL present','Reported stock','Last refreshed'];
       const cell=v=>'"'+String(v??'').replace(/[\r\n]+/g,' ').replace(/^([=+@-])/,(m)=>"'"+m).replace(/"/g,'""')+'"';
       const lines=[header.map(cell).join(',')];
