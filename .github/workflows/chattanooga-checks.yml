@@ -5,6 +5,11 @@ on:
     paths:
       - 'pe_site/server/**'
       - '.github/workflows/chattanooga-checks.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pe_site/server/**'
+      - '.github/workflows/chattanooga-checks.yml'
   workflow_dispatch:
 permissions:
   contents: read
