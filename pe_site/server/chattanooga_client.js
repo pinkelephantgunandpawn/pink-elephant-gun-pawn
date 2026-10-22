@@ -99,8 +99,10 @@ export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, tok
       if (controller.signal.aborted) throw new ChattanoogaApiError('Supplier request timed out', 504);
       throw new ChattanoogaApiError('Supplier request could not be completed', 502);
     } finally { clearTimeout(timer); }
+    if (!response || typeof response.ok !== 'boolean' || !Number.isInteger(response.status) || typeof response.json !== 'function')
+      throw new ChattanoogaApiError('Invalid supplier HTTP response', 502);
     let body;
-    try { body = await response.json(); } catch { throw new ChattanoogaApiError('Invalid JSON from Chattanooga', response.status); }
+    try { body = await response.json(); } catch { throw new ChattanoogaApiError('Invalid JSON from Chattanooga', 502); }
     if (!response.ok || body?.error_code) {
       throw new ChattanoogaApiError('Chattanooga API request failed', response.status, body?.error_code);
     }
