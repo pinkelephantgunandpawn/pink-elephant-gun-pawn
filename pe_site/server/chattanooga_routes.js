@@ -141,6 +141,36 @@ export function createChattanoogaRouter(pool) {
       }finally{clearTimeout(timer);}
     }catch(e){if(e?.status===429||e?.code==='too-many-requests'){feedInspectionCooldownUntil=Date.now()+30*60*1000;res.set('Retry-After','1800');}console.error('Chattanooga product feed diagnostic:',e?.message);res.status(e?.status===429||e?.code==='too-many-requests'?429:502).json({error:'Product-feed inspection failed at '+step+'. Supplier HTTP status: '+(Number.isInteger(e?.status)?e.status:'unknown')+'; supplier code: '+(e?.code===undefined||e?.code===null?'none':String(e.code).slice(0,32))+'. No products changed.'});}
   });
+  // Read-only HTTPS capability probe for the supplier-generated CSV URL.
+  // Never issue plaintext requests, follow redirects, or expose signed URLs.
+  router.get('/product-feed/https-probe',async(_req,res)=>{
+    res.set('Cache-Control','no-store');
+    try{
+      const feed=await client().getProductFeed({optional_columns:'retail_map,specifications',primary_image_only_flag:1});
+      const link=feed?.product_feed?.url;
+      if(typeof link!=='string')return res.status(502).json({error:'Supplier did not return a feed URL',read_only:true});
+      const original=new URL(link);
+      if(!['http:','https:'].includes(original.protocol)||
+        original.hostname!=='api.chattanoogashooting.com'||
+        !/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(original.pathname)||
+        original.username||original.password||original.port)
+        return res.status(502).json({error:'Unrecognized supplier feed location; no probe attempted',read_only:true});
+      const candidate=new URL(original.href);
+      candidate.protocol='https:';
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),8000);
+      try{
+        const response=await fetch(candidate,{method:'HEAD',redirect:'error',signal:controller.signal,
+          headers:{Accept:'text/csv'}});
+        res.json({original_scheme:original.protocol.slice(0,-1),https_head_status:response.status,
+          https_responded:response.ok,content_type_is_csv:/csv|octet-stream/i.test(response.headers.get('content-type')||''),
+          read_only:true,notice:'HTTPS HEAD request only; no CSV downloaded, URLs or credentials returned. A successful HEAD does not prove CSV content is valid.'});
+      }finally{clearTimeout(timer);}
+    }catch(e){
+      console.error('Chattanooga HTTPS feed probe',{name:e?.name,status:e?.status===429?429:undefined});
+      res.status(e?.status===429?429:502).json({error:'HTTPS feed capability probe unavailable',read_only:true});
+    }
+  });
   router.get('/field-diagnostics',async(_req,res)=>{try{
     const data=await client().getItems({page:1,per_page:3});
     const items=list(data);
