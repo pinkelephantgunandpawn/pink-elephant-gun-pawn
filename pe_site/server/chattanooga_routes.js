@@ -231,6 +231,29 @@ export function createChattanoogaRouter(pool) {
       res.status(e?.status===429?429:502).json({error:'ID matching diagnostic unavailable. No products changed.'});
     }
   });
+  // Explicitly bounded, read-only cross-page ID comparison. No supplier records or IDs returned.
+  router.get('/multi-page-id-diagnostics',async(_req,res)=>{
+    try{
+      const pages=[1,2,3];
+      const results=[];
+      for(const page of pages){
+        const items=list(await client().getItems({page,per_page:50}));
+        const ids=items.map(item=>text(item.cssi_id,120)).filter(Boolean);
+        const unique=[...new Set(ids)];
+        const {rows}=unique.length?await pool.query(
+          'SELECT supplier_item_id FROM chattanooga_reference WHERE supplier_item_id=ANY($1::text[])',
+          [unique]
+        ):{rows:[]};
+        const matched=new Set(rows.map(row=>row.supplier_item_id));
+        results.push({page,sampled:items.length,ids_present:ids.length,exact_matches:ids.filter(id=>matched.has(id)).length});
+      }
+      res.set('Cache-Control','no-store');
+      res.json({pages:results,read_only:true,notice:'Bounded first three pages only; no raw IDs, products, or prices returned. No products changed.'});
+    }catch(e){
+      console.error('Chattanooga multi-page ID diagnostic',{name:e?.name,status:e?.status===429?429:undefined,code:typeof e?.code==='string'?e.code.slice(0,12):undefined});
+      res.status(e?.status===429?429:502).json({error:'Multi-page ID diagnostic unavailable. No products changed.'});
+    }
+  });
   // Bounded read-only comparison of stored reference IDs and live supplier cssi_id formats.
   router.get('/reference-format-diagnostics',async(_req,res)=>{
     try{
