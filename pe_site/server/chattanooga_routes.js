@@ -254,6 +254,19 @@ export function createChattanoogaRouter(pool) {
       res.status(e?.status===429?429:502).json({error:'Multi-page ID diagnostic unavailable. No products changed.'});
     }
   });
+  // Authenticated admin-only diagnostic: return at most 50 supplier item identifiers for
+  // local comparison with an uploaded inventory CSV. Never return credentials or prices.
+  router.get('/raw-id-sample',async(_req,res)=>{
+    try{
+      const items=list(await client().getItems({page:1,per_page:50}));
+      const ids=items.map(item=>text(item.cssi_id,120)).filter(Boolean);
+      res.set('Cache-Control','no-store');
+      res.json({ids,records_checked:items.length,read_only:true,notice:'Admin-only supplier identifiers for local comparison. No inventory or product changes.'});
+    }catch(e){
+      console.error('Chattanooga raw ID sample diagnostic',{name:e?.name,status:e?.status===429?429:undefined});
+      res.status(e?.status===429?429:502).json({error:'Supplier ID sample unavailable. No products changed.'});
+    }
+  });
   // Bounded read-only comparison of stored reference IDs and live supplier cssi_id formats.
   router.get('/reference-format-diagnostics',async(_req,res)=>{
     try{
