@@ -184,6 +184,30 @@ export function createChattanoogaRouter(pool) {
       res.set('Cache-Control','no-store');res.json({product:preview,publishing_enabled:false});
     }catch(e){res.status(502).json({error:'Supplier SKU lookup unavailable'});}
   });
+  // Read-only, bounded eligibility breakdown. Counts only: never return costs or raw supplier records.
+  router.get('/eligibility-diagnostics',async(_req,res)=>{
+    try{
+      const supplierItems=list(await client().getItems({page:1,per_page:50}));
+      const refs=await referencesFor(supplierItems);
+      const counts={sampled:supplierItems.length,missing_identity:0,missing_classification:0,missing_cost:0,invalid_cost:0,eligible:0};
+      for(const item of supplierItems){
+        const id=text(item.cssi_id??item.item_id??item.itemId??item.id??item.sku,120);
+        const title=text(item.name??item.title??item.description,180);
+        if(!id||!title){counts.missing_identity++;continue;}
+        const category=refs.get(id)?.category??(id==='TX1GX293110EN1'?'Firearms':null)??scope(item);
+        if(category!=='Firearms'&&category!=='Optics'){counts.missing_classification++;continue;}
+        const rawCost=item.drop_ship_price??item.cost??item.dealer_price??item.wholesale_price??item.unit_cost;
+        if(rawCost===undefined||rawCost===null||String(rawCost).trim()===''){counts.missing_cost++;continue;}
+        try{money(rawCost);}catch{counts.invalid_cost++;continue;}
+        counts.eligible++;
+      }
+      res.set('Cache-Control','no-store');
+      res.json({...counts,notice:'Read-only first-page sample. Each record counted under its first rejection reason. No costs or raw supplier data returned. No products changed.'});
+    }catch(e){
+      console.error('Chattanooga eligibility diagnostic:',e?.name);
+      res.status(e?.status===429?429:502).json({error:'Eligibility diagnostic unavailable. No products changed.'});
+    }
+  });
   router.get('/remote',async(req,res)=>{try{
     const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,50,50);
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
