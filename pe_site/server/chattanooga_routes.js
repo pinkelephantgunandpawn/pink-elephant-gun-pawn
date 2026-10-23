@@ -238,7 +238,7 @@ export function createChattanoogaRouter(pool) {
       const live=items.map(x=>text(x.cssi_id,120)).filter(Boolean);
       const {rows}=await pool.query('SELECT supplier_item_id FROM chattanooga_reference ORDER BY supplier_item_id LIMIT 250');
       const stored=rows.map(x=>text(x.supplier_item_id,120)).filter(Boolean);
-      const shape=id=>/^\\d+$/.test(id)?'numeric':/^[A-Za-z]+$/.test(id)?'letters':/^[A-Za-z0-9]+$/.test(id)?'alphanumeric':'mixed_or_punctuated';
+      const shape=id=>/^\d+$/.test(id)?'numeric':/^[A-Za-z]+$/.test(id)?'letters':/^[A-Za-z0-9]+$/.test(id)?'alphanumeric':'mixed_or_punctuated';
       const summary=ids=>({
         count:ids.length,
         formats:Object.fromEntries(['numeric','letters','alphanumeric','mixed_or_punctuated'].map(k=>[k,ids.filter(id=>shape(id)===k).length])),
