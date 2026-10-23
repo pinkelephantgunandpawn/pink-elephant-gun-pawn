@@ -208,6 +208,29 @@ export function createChattanoogaRouter(pool) {
       res.status(e?.status===429?429:502).json({error:'Eligibility diagnostic unavailable. No products changed.'});
     }
   });
+  // Read-only first-page identity matching diagnostic. No identifiers, prices, or records returned.
+  router.get('/id-match-diagnostics',async(_req,res)=>{
+    try{
+      const items=list(await client().getItems({page:1,per_page:50}));
+      const keys=['cssi_id','item_id','itemId','id','sku'];
+      const values=Object.fromEntries(keys.map(key=>[key,new Set()]));
+      for(const item of items)for(const key of keys){
+        const value=text(item[key],120);
+        if(value)values[key].add(value);
+      }
+      const allIds=[...new Set(keys.flatMap(key=>[...values[key]]))];
+      const rows=allIds.length?(await pool.query('SELECT supplier_item_id FROM chattanooga_reference WHERE supplier_item_id=ANY($1::text[])',[allIds])).rows:[];
+      const known=new Set(rows.map(row=>row.supplier_item_id));
+      const matched_by_field=Object.fromEntries(keys.map(key=>[key,[...values[key]].filter(id=>known.has(id)).length]));
+      const matched_items=items.filter(item=>keys.some(key=>known.has(text(item[key],120)))).length;
+      const fields_present=Object.fromEntries(keys.map(key=>[key,items.filter(item=>!!text(item[key],120)).length]));
+      res.set('Cache-Control','no-store');
+      res.json({sampled:items.length,matched_items,unmatched_items:items.length-matched_items,matched_by_field,fields_present,notice:'Read-only sample; counts only. No IDs, prices, or raw supplier data returned. No products changed.'});
+    }catch(e){
+      console.error('Chattanooga ID matching diagnostic:',e?.name);
+      res.status(e?.status===429?429:502).json({error:'ID matching diagnostic unavailable. No products changed.'});
+    }
+  });
   router.get('/remote',async(req,res)=>{try{
     const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,50,50);
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
