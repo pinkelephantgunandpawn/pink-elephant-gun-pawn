@@ -31,6 +31,25 @@ export function attachChattanoogaReferenceRoutes(router,pool){
       res.status(503).json({error:'Reference schema check unavailable',read_only:true});
     }
   });
+  // Read-only SQL compatibility test; never return IDs or query values.
+  router.get('/reference/query-check',async(_req,res)=>{
+    const results={read_only:true};
+    for(const [name,sql] of [
+      ['sample',"SELECT supplier_item_id FROM chattanooga_reference ORDER BY supplier_item_id LIMIT 1"],
+      ['lowercase',"SELECT LOWER(supplier_item_id) FROM chattanooga_reference LIMIT 1"],
+      ['array_match',"SELECT supplier_item_id FROM chattanooga_reference WHERE LOWER(supplier_item_id)=ANY($1::text[]) LIMIT 1"]
+    ]){
+      try{
+        await pool.query(sql,name==='array_match'?[['__diagnostic_nonmatching_value__']]:[]);
+        results[name]='ok';
+      }catch(e){
+        results[name]='failed';
+        results[name+'_code']=String(e?.code||'unknown').slice(0,12);
+      }
+    }
+    res.set('Cache-Control','no-store');
+    res.json(results);
+  });
   router.post('/reference/upload',upload.single('file'),async(req,res)=>{
     if(!req.file)return res.status(400).json({error:'Upload the filtered firearms/optics CSV'});
     if(!/\.csv$/i.test(req.file.originalname))return res.status(400).json({error:'CSV only'});
