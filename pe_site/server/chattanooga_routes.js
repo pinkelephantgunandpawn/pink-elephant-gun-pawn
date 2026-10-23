@@ -247,7 +247,7 @@ export function createChattanoogaRouter(pool) {
       });
       const lower=new Set(live.map(id=>id.toLowerCase()));
       const exact=new Set(live);
-      const {rows:caseRows}=live.length?await pool.query('SELECT supplier_item_id FROM chattanooga_reference WHERE LOWER(supplier_item_id)=ANY($1::text[])',[...lower]):{rows:[]};
+      const {rows:caseRows}=live.length?await pool.query('SELECT supplier_item_id FROM chattanooga_reference WHERE LOWER(supplier_item_id)=ANY($1::text[])',[[...lower]]):{rows:[]};
       const caseInsensitiveMatches=caseRows.filter(row=>!exact.has(row.supplier_item_id)).length;
       res.set('Cache-Control','no-store');
       res.json({reference_sample:summary(stored),supplier_sample:summary(live),case_insensitive_only_matches:caseInsensitiveMatches,notice:'Reference sample is first 250 sorted IDs; supplier sample is first 50 API records. Aggregate formats only; no IDs or prices returned. No products changed.'});
