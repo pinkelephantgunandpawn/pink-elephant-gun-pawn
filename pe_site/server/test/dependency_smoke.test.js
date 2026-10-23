@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import nodemailer from 'nodemailer';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { HttpResponse } from '@smithy/protocol-http';
 
 test('Nodemailer builds order email without SMTP network traffic', async () => {
   const transport = nodemailer.createTransport({ jsonTransport: true });
@@ -30,7 +29,7 @@ test('S3 PutObject serializes image upload without contacting R2', async () => {
     requestHandler: {
       handle: async (req) => {
         request = req;
-        return { response: new HttpResponse({ statusCode: 200, headers: { etag: '"test-etag"' }, body: new Uint8Array() }) };
+        return { response: { statusCode: 200, headers: { etag: '"test-etag"' }, body: new Uint8Array() } };
       },
     },
   });
