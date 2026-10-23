@@ -231,6 +231,31 @@ export function createChattanoogaRouter(pool) {
       res.status(e?.status===429?429:502).json({error:'ID matching diagnostic unavailable. No products changed.'});
     }
   });
+  // Bounded read-only comparison of stored reference IDs and live supplier cssi_id formats.
+  router.get('/reference-format-diagnostics',async(_req,res)=>{
+    try{
+      const items=list(await client().getItems({page:1,per_page:50}));
+      const live=items.map(x=>text(x.cssi_id,120)).filter(Boolean);
+      const {rows}=await pool.query('SELECT supplier_item_id FROM chattanooga_reference ORDER BY supplier_item_id LIMIT 250');
+      const stored=rows.map(x=>text(x.supplier_item_id,120)).filter(Boolean);
+      const shape=id=>/^\\d+$/.test(id)?'numeric':/^[A-Za-z]+$/.test(id)?'letters':/^[A-Za-z0-9]+$/.test(id)?'alphanumeric':'mixed_or_punctuated';
+      const summary=ids=>({
+        count:ids.length,
+        formats:Object.fromEntries(['numeric','letters','alphanumeric','mixed_or_punctuated'].map(k=>[k,ids.filter(id=>shape(id)===k).length])),
+        min_length:ids.length?Math.min(...ids.map(id=>id.length)):0,
+        max_length:ids.length?Math.max(...ids.map(id=>id.length)):0
+      });
+      const lower=new Set(live.map(id=>id.toLowerCase()));
+      const exact=new Set(live);
+      const {rows:caseRows}=live.length?await pool.query('SELECT supplier_item_id FROM chattanooga_reference WHERE LOWER(supplier_item_id)=ANY($1::text[])',[...lower]):{rows:[]};
+      const caseInsensitiveMatches=caseRows.filter(row=>!exact.has(row.supplier_item_id)).length;
+      res.set('Cache-Control','no-store');
+      res.json({reference_sample:summary(stored),supplier_sample:summary(live),case_insensitive_only_matches:caseInsensitiveMatches,notice:'Reference sample is first 250 sorted IDs; supplier sample is first 50 API records. Aggregate formats only; no IDs or prices returned. No products changed.'});
+    }catch(e){
+      console.error('Chattanooga reference format diagnostic:',e?.name);
+      res.status(e?.status===429?429:502).json({error:'Reference format diagnostic unavailable. No products changed.'});
+    }
+  });
   router.get('/remote',async(req,res)=>{try{
     const page=bounded(req.query.page,1,100000),per_page=bounded(req.query.per_page,50,50);
     if(req.query.feed==='1') return res.status(400).json({error:'Product-feed CSV is not available in this read-only preview'});
