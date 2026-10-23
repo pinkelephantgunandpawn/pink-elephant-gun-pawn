@@ -145,6 +145,9 @@ export function createChattanoogaRouter(pool) {
   // Never issue plaintext requests, follow redirects, or expose signed URLs.
   router.get('/product-feed/https-probe',async(_req,res)=>{
     res.set('Cache-Control','no-store');
+    const remaining=Math.ceil((feedInspectionCooldownUntil-Date.now())/1000);
+    if(remaining>0){res.set('Retry-After',String(remaining));return res.status(429).json({error:'Supplier feed diagnostics are cooling down',retry_after_seconds:remaining,read_only:true});}
+    let step='feed_request';
     try{
       const feed=await client().getProductFeed({optional_columns:'retail_map,specifications',primary_image_only_flag:1});
       const link=feed?.product_feed?.url;
@@ -160,15 +163,23 @@ export function createChattanoogaRouter(pool) {
       const controller=new AbortController();
       const timer=setTimeout(()=>controller.abort(),8000);
       try{
+        step='https_head';
         const response=await fetch(candidate,{method:'HEAD',redirect:'error',signal:controller.signal,
           headers:{Accept:'text/csv'}});
+        if(response.status===429){
+          feedInspectionCooldownUntil=Date.now()+30*60*1000;
+          res.set('Retry-After','1800');
+          return res.status(429).json({error:'Supplier HTTPS capability request rate limited',stage:step,retry_after_seconds:1800,read_only:true});
+        }
         res.json({original_scheme:original.protocol.slice(0,-1),https_head_status:response.status,
           https_responded:response.ok,content_type_is_csv:/csv|octet-stream/i.test(response.headers.get('content-type')||''),
           read_only:true,notice:'HTTPS HEAD request only; no CSV downloaded, URLs or credentials returned. A successful HEAD does not prove CSV content is valid.'});
       }finally{clearTimeout(timer);}
     }catch(e){
-      console.error('Chattanooga HTTPS feed probe',{name:e?.name,status:e?.status===429?429:undefined});
-      res.status(e?.status===429?429:502).json({error:'HTTPS feed capability probe unavailable',read_only:true});
+      const rateLimited=e?.status===429||e?.code==='too-many-requests';
+      if(rateLimited){feedInspectionCooldownUntil=Date.now()+30*60*1000;res.set('Retry-After','1800');}
+      console.error('Chattanooga HTTPS feed probe',{stage:step,status:rateLimited?429:undefined});
+      res.status(rateLimited?429:502).json({error:'HTTPS feed capability probe unavailable',stage:step,...(rateLimited?{retry_after_seconds:1800}:{}),read_only:true});
     }
   });
   router.get('/field-diagnostics',async(_req,res)=>{try{
@@ -759,3 +770,4 @@ export function createChattanoogaRouter(pool) {
   });
   return router;
 }
+
