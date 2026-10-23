@@ -19,6 +19,18 @@ export function attachChattanoogaReferenceRoutes(router,pool){
       res.set('Cache-Control','no-store');res.json({categories:rows,publication_enabled:false,reference_only:true});
     }catch{res.status(500).json({error:'Reference status unavailable'});}
   });
+  // Read-only reference schema probe; reports no record values.
+  router.get('/reference/schema-check',async(_req,res)=>{
+    try{
+      const result=await pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='chattanooga_reference'");
+      const columns=new Set(result.rows.map(row=>row.column_name));
+      res.set('Cache-Control','no-store');
+      res.json({table_found:columns.size>0,id_column_present:columns.has('supplier_item_id'),reference_count_column_present:columns.has('category'),read_only:true});
+    }catch(e){
+      console.error('Chattanooga reference schema check failed',{code:e?.code||'unknown'});
+      res.status(503).json({error:'Reference schema check unavailable',read_only:true});
+    }
+  });
   router.post('/reference/upload',upload.single('file'),async(req,res)=>{
     if(!req.file)return res.status(400).json({error:'Upload the filtered firearms/optics CSV'});
     if(!/\.csv$/i.test(req.file.originalname))return res.status(400).json({error:'CSV only'});
