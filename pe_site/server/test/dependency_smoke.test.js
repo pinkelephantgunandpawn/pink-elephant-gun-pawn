@@ -14,7 +14,7 @@ test('Nodemailer builds order email without SMTP network traffic', async () => {
   });
   const message = JSON.parse(result.message);
   assert.equal(message.subject, 'Pink Elephant — Order confirmation');
-  assert.equal(message.to.address, 'customer@example.invalid');
+  assert.equal(message.to[0].address, 'customer@example.invalid');
   assert.match(message.text, /order has been received/);
   transport.close();
 });
