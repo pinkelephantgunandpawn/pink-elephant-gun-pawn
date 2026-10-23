@@ -101,7 +101,7 @@ export function createChattanoogaRouter(pool) {
       if(typeof link!=='string')return res.status(502).json({error:'Supplier did not return a product-feed URL'});
       step='validating supplier CSV location';
       const u=new URL(link);
-      if(!['https:','http:'].includes(u.protocol)||u.hostname!=='api.chattanoogashooting.com'||!/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(u.pathname)||u.username||u.password){
+      if(!['https:','http:'].includes(u.protocol)||u.hostname!=='api.chattanoogashooting.com'||!/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(u.pathname)||u.username||u.password||u.port){
         // Do not follow an unapproved URL. Expose only safe routing metadata,
         // never the full link, signed query, path identifiers, or credentials.
         res.set('Cache-Control','no-store');
@@ -133,13 +133,13 @@ export function createChattanoogaRouter(pool) {
         }finally{await reader.cancel().catch(()=>{});}
         step='parsing CSV columns';
         const header=prefix.split(/\r?\n/,1)[0].replace(/^\uFEFF/,'');
-        if(!header||header.length>16384)throw Error('Invalid CSV header');
+        if(!header||header.length>16384||!/^(?:"(?:[^"]|"")*"|[^",]*)(?:,(?:"(?:[^"]|"")*"|[^",]*))*$/.test(header))throw Error('Invalid CSV header');
         const columns=header.match(/("(?:[^"]|"")*"|[^,]*)(,|$)/g)?.map(x=>x.replace(/,$/,'').replace(/^"|"$/g,'').replace(/""/g,'"').trim()).filter(Boolean)||[];
         if(!columns.length)throw Error('No CSV columns');
         res.set('Cache-Control','no-store');
         res.json({column_count:columns.length,columns:columns.slice(0,150),image_columns:columns.filter(x=>/image|photo|picture|media|thumbnail/i.test(x)),map_columns:columns.filter(x=>/map|minimum.advertised/i.test(x)),stock_columns:columns.filter(x=>/inventory|stock|allocat|quantity/i.test(x)),notice:'Read-only column inspection. No CSV saved, products staged, or supplier orders submitted.'});
       }finally{clearTimeout(timer);}
-    }catch(e){if(e?.status===429||e?.code==='too-many-requests'){feedInspectionCooldownUntil=Date.now()+30*60*1000;res.set('Retry-After','1800');}console.error('Chattanooga product feed diagnostic:',e?.message);res.status(e?.status===429||e?.code==='too-many-requests'?429:502).json({error:'Product-feed inspection failed at '+step+'. Supplier HTTP status: '+(Number.isInteger(e?.status)?e.status:'unknown')+'; supplier code: '+(e?.code===undefined||e?.code===null?'none':String(e.code).slice(0,32))+'. No products changed.'});}
+    }catch(e){if(e?.status===429||e?.code==='too-many-requests'){feedInspectionCooldownUntil=Date.now()+30*60*1000;res.set('Retry-After','1800');}console.error('Chattanooga product feed diagnostic',{stage:step,status:Number.isInteger(e?.status)?e.status:undefined});res.status(e?.status===429||e?.code==='too-many-requests'?429:502).json({error:'Product-feed inspection failed at '+step+'. Supplier HTTP status: '+(Number.isInteger(e?.status)?e.status:'unknown')+'. No products changed.'});}
   });
   // Read-only HTTPS capability probe for the supplier-generated CSV URL.
   // Never issue plaintext requests, follow redirects, or expose signed URLs.
