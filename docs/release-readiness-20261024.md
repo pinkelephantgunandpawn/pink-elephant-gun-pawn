@@ -53,3 +53,10 @@ Recommended review order: dependency security PR #24, diagnostic PR #22, bootstr
 ## Supplier dependency
 
 Known facts remain unchanged: full feed once per 20 minutes, images present per support, CSV HTTP-only per support, secure alternative already requested. Do not perform further supplier requests or weaken transport checks. HTTPS/SFTP alternative and quota identity/reset/free-text countdown format remain external questions. No catalog image population or supplier transaction work is included.
+
+
+## Final offline integration check
+
+The temporary combined candidate (dependency patches, diagnostics, bootstrap and shop-search fixes) passed all 75 tests after a clean npm ci; its fresh production dependency audit reported zero vulnerabilities. No production server or database was started. Twenty-two inline script blocks across index/shop/admin/account/Chattanooga passed node --check. Sampled static HTML targets had no missing files. These results do not replace post-approval deployed/browser/mobile verification.
+
+The saved Library backup was downloaded again and verified: 109,959,524 bytes; 508 members; 499 images; database export included; every recorded checksum passed; ZIP SHA-256 a0d0c56ce88f37801c03bb7bc17378681d500af494c8a056f48ed648a937241f. An incomplete local working copy was preserved separately and the working ZIP refreshed from this verified saved artifact. No Library version, source restore ref, database or storage object changed.
