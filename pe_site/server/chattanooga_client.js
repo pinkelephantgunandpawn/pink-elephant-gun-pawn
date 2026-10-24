@@ -77,7 +77,19 @@ export function evaluateFflStatus(response, requestedNumber) {
     requires_manual_review:onFile!==true||optedOut!==false});
 }
 
-export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, token = process.env.CHATTANOOGA_TOKEN, fetchImpl = globalThis.fetch } = {}) {
+export function parseRetryAfterSeconds(value, now=Date.now()) {
+  if(typeof value!=='string'||!value.trim())return undefined;
+  const text=value.trim();
+  if(/^\d+$/.test(text)){
+    const seconds=Number(text);
+    return Number.isSafeInteger(seconds)&&Number.isSafeInteger(now+seconds*1000)?seconds:undefined;
+  }
+  if(!/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(text))return undefined;
+  const date=Date.parse(text);
+  return Number.isFinite(date)?Math.max(0,Math.ceil((date-now)/1000)):undefined;
+}
+
+export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, token = process.env.CHATTANOOGA_TOKEN, fetchImpl = globalThis.fetch, requestTimeoutMs=15000, maxResponseBytes=4*1024*1024 } = {}) {
   if (!sid || !token) throw new Error('Chattanooga credentials are not configured');
   if (typeof fetchImpl !== 'function') throw new Error('fetch is required');
   const hashedToken = createHash('md5').update(token, 'utf8').digest('hex');
@@ -91,23 +103,52 @@ export function createChattanoogaClient({ sid = process.env.CHATTANOOGA_SID, tok
       if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    let response;
-    try {
-      response = await fetchImpl(url, { method:'GET', redirect:'error', headers:{ Authorization:authorization, Accept:'application/json' }, signal:controller.signal });
-    } catch (error) {
-      if (controller.signal.aborted) throw new ChattanoogaApiError('Supplier request timed out', 504);
-      throw new ChattanoogaApiError('Supplier request could not be completed', 502);
-    } finally { clearTimeout(timer); }
-    if (!response || typeof response.ok !== 'boolean' || !Number.isInteger(response.status) || typeof response.json !== 'function')
-      throw new ChattanoogaApiError('Invalid supplier HTTP response', 502);
-    let body;
-    try { body = await response.json(); } catch { throw new ChattanoogaApiError('Invalid JSON from Chattanooga', 502); }
-    if (!response.ok || body?.error_code) {
-      throw new ChattanoogaApiError('Chattanooga API request failed', response.status, body?.error_code);
+    let timer;
+    const timeout=new Promise((_resolve,reject)=>{
+      timer=setTimeout(()=>{controller.abort();reject(new ChattanoogaApiError('Supplier request timed out',504));},requestTimeoutMs);
+    });
+    async function requestAndParse(){
+      const response=await fetchImpl(url,{method:'GET',redirect:'error',headers:{Authorization:authorization,Accept:'application/json'},signal:controller.signal});
+      if(!response||typeof response.ok!=='boolean'||!Number.isInteger(response.status)||typeof response.json!=='function')
+        throw new ChattanoogaApiError('Invalid supplier HTTP response',502);
+      const retryAfterSeconds=parseRetryAfterSeconds(response.headers?.get?.('retry-after'));
+      const httpError=()=>Object.assign(new ChattanoogaApiError('Chattanooga API request failed',response.status),
+        retryAfterSeconds===undefined?{}:{retryAfterSeconds});
+      // Retain upstream status even when an error page is HTML or malformed JSON.
+      if(!response.ok){void response.body?.cancel?.().catch(()=>{});throw httpError();}
+      let body;
+      const reader=response.body?.getReader?.();
+      try{
+        if(reader){
+          const decoder=new TextDecoder();let json='',bytes=0;
+          try{
+            while(true){const chunk=await reader.read();if(chunk.done)break;
+              bytes+=chunk.value.byteLength;
+              if(bytes>maxResponseBytes)throw new ChattanoogaApiError('Supplier response exceeds safety limit',502);
+              json+=decoder.decode(chunk.value,{stream:true});
+            }
+            json+=decoder.decode();body=JSON.parse(json);
+          }finally{void reader.cancel().catch(()=>{});}
+        }else body=await response.json();
+      }catch(error){
+        if(error instanceof ChattanoogaApiError)throw error;
+        throw new ChattanoogaApiError('Invalid JSON from Chattanooga',502);
+      }
+      if(body?.error_code){
+        const code=body.error_code==='too-many-requests'?'too-many-requests':undefined;
+        throw Object.assign(new ChattanoogaApiError('Chattanooga API request failed',code?429:502,code),
+          retryAfterSeconds===undefined?{}:{retryAfterSeconds});
+      }
+      if(!body||typeof body!=='object'||Array.isArray(body))throw new ChattanoogaApiError('Unexpected supplier JSON structure',502);
+      return body;
     }
-    if (!body || typeof body !== 'object' || Array.isArray(body))
-      throw new ChattanoogaApiError('Unexpected supplier JSON structure', 502);
+    let body;
+    try{body=await Promise.race([requestAndParse(),timeout]);}
+    catch(error){
+      if(error instanceof ChattanoogaApiError)throw error;
+      throw new ChattanoogaApiError(controller.signal.aborted?'Supplier request timed out':'Supplier request could not be completed',controller.signal.aborted?504:502);
+    }finally{clearTimeout(timer);}
+
     return body;
   }
   return Object.freeze({

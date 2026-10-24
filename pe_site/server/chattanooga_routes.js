@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { attachChattanoogaReferenceRoutes } from './chattanooga_reference.js';
-import { createChattanoogaClient, evaluateFflStatus, ChattanoogaApiError } from './chattanooga_client.js';
+import { createChattanoogaClient, evaluateFflStatus, ChattanoogaApiError, parseRetryAfterSeconds } from './chattanooga_client.js';
 import { retailPriceCents, parseSupplierMoneyCents, draftAdvertisedPrice } from './chattanooga_pricing.js';
 
 // All routes MUST be mounted behind the application's existing auth and manager role middleware.
@@ -89,19 +89,30 @@ export function createChattanoogaRouter(pool) {
   router.get('/health',(_req,res)=>res.json({configured:!!(process.env.CHATTANOOGA_SID&&process.env.CHATTANOOGA_TOKEN),version:'v6',default_markup:20,ordering_enabled:false}));
   // Read-only product-feed diagnostic: fetch only a small prefix of the supplier CSV.
   // Never expose a signed feed URL, API credentials, or item records to the browser.
-  let feedInspectionCooldownUntil=0;
+  // Fail closed across process restarts without adding persistent state or DB writes.
+  // A previous process may have generated a feed immediately before shutdown.
+  const feedWindowMs=20*60*1000;
+  let feedInspectionCooldownUntil=Date.now()+feedWindowMs;
+  const reserveFeedWindow=()=>{feedInspectionCooldownUntil=Date.now()+feedWindowMs;};
+  const rateLimitFeed=(seconds)=>{
+    const wait=Number.isSafeInteger(seconds)&&seconds>=0?Math.max(1200,seconds):1800;
+    feedInspectionCooldownUntil=Math.max(feedInspectionCooldownUntil,Date.now()+wait*1000);
+    return Math.ceil((feedInspectionCooldownUntil-Date.now())/1000);
+  };
   router.get('/product-feed/diagnostics',async(_req,res)=>{
     const remaining=Math.ceil((feedInspectionCooldownUntil-Date.now())/1000);
     if(remaining>0){res.set('Retry-After',String(remaining));res.set('Cache-Control','no-store');return res.status(429).json({error:'Chattanooga product-feed inspection is cooling down. Please wait about '+Math.ceil(remaining/60)+' minute(s) before trying again. No products changed.',retry_after_seconds:remaining});}
     let step='requesting supplier feed';
     try{
+      reserveFeedWindow(); // Reserve before await: concurrent diagnostics cannot duplicate the API call.
       const feed=await client().getProductFeed({optional_columns:'retail_map,specifications',primary_image_only_flag:1});
+      reserveFeedWindow(); // The documented interval begins conservatively after completion.
       step='checking supplier feed response';
       const link=feed?.product_feed?.url;
       if(typeof link!=='string')return res.status(502).json({error:'Supplier did not return a product-feed URL'});
       step='validating supplier CSV location';
       const u=new URL(link);
-      if(!['https:','http:'].includes(u.protocol)||u.hostname!=='api.chattanoogashooting.com'||!/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(u.pathname)||u.username||u.password){
+      if(!['https:','http:'].includes(u.protocol)||u.hostname!=='api.chattanoogashooting.com'||!/^\/rest\/v[456]\/files\/customer_feeds\/products\//.test(u.pathname)||u.username||u.password||u.port){
         // Do not follow an unapproved URL. Expose only safe routing metadata,
         // never the full link, signed query, path identifiers, or credentials.
         res.set('Cache-Control','no-store');
@@ -119,7 +130,9 @@ export function createChattanoogaRouter(pool) {
       let response;
       try{
         response=await fetch(u,{headers:{Range:'bytes=0-65535',Accept:'text/csv'},signal:controller.signal,redirect:'error'});
-        if(!response.ok)return res.status(502).json({error:'Unable to retrieve supplier product-feed header'});
+        if(response.status===429){const retry=rateLimitFeed(parseRetryAfterSeconds(response.headers?.get?.('retry-after'),Date.now()));res.set('Retry-After',String(retry));void response.body?.cancel?.().catch(()=>{});return res.status(429).json({error:'Supplier feed download rate limited',retry_after_seconds:retry,read_only:true});}
+        if(!response.ok){void response.body?.cancel?.().catch(()=>{});return res.status(502).json({error:'Unable to retrieve supplier product-feed header'});}
+        if(!/^(?:text\/(?:csv|plain)|application\/(?:csv|octet-stream))(?:;|$)/i.test(response.headers?.get?.('content-type')||'')){void response.body?.cancel?.().catch(()=>{});return res.status(502).json({error:'Unexpected supplier feed content type'});}
         const reader=response.body?.getReader();
         if(!reader)return res.status(502).json({error:'Supplier feed returned no readable content'});
         const decoder=new TextDecoder();let prefix='',total=0;
@@ -133,20 +146,25 @@ export function createChattanoogaRouter(pool) {
         }finally{await reader.cancel().catch(()=>{});}
         step='parsing CSV columns';
         const header=prefix.split(/\r?\n/,1)[0].replace(/^\uFEFF/,'');
-        if(!header||header.length>16384)throw Error('Invalid CSV header');
+        if(!header||header.length>16384||!/^(?:"(?:[^"]|"")*"|[^",]*)(?:,(?:"(?:[^"]|"")*"|[^",]*))*$/.test(header))throw Error('Invalid CSV header');
         const columns=header.match(/("(?:[^"]|"")*"|[^,]*)(,|$)/g)?.map(x=>x.replace(/,$/,'').replace(/^"|"$/g,'').replace(/""/g,'"').trim()).filter(Boolean)||[];
         if(!columns.length)throw Error('No CSV columns');
         res.set('Cache-Control','no-store');
         res.json({column_count:columns.length,columns:columns.slice(0,150),image_columns:columns.filter(x=>/image|photo|picture|media|thumbnail/i.test(x)),map_columns:columns.filter(x=>/map|minimum.advertised/i.test(x)),stock_columns:columns.filter(x=>/inventory|stock|allocat|quantity/i.test(x)),notice:'Read-only column inspection. No CSV saved, products staged, or supplier orders submitted.'});
       }finally{clearTimeout(timer);}
-    }catch(e){if(e?.status===429||e?.code==='too-many-requests'){feedInspectionCooldownUntil=Date.now()+30*60*1000;res.set('Retry-After','1800');}console.error('Chattanooga product feed diagnostic:',e?.message);res.status(e?.status===429||e?.code==='too-many-requests'?429:502).json({error:'Product-feed inspection failed at '+step+'. Supplier HTTP status: '+(Number.isInteger(e?.status)?e.status:'unknown')+'; supplier code: '+(e?.code===undefined||e?.code===null?'none':String(e.code).slice(0,32))+'. No products changed.'});}
+    }catch(e){if(e?.status===429||e?.code==='too-many-requests'){res.set('Retry-After',String(rateLimitFeed(e?.retryAfterSeconds)));}console.error('Chattanooga product feed diagnostic',{stage:step,status:Number.isInteger(e?.status)?e.status:undefined});res.status(e?.status===429||e?.code==='too-many-requests'?429:502).json({error:'Product-feed inspection failed at '+step+'. Supplier HTTP status: '+(Number.isInteger(e?.status)?e.status:'unknown')+'. No products changed.'});}
   });
   // Read-only HTTPS capability probe for the supplier-generated CSV URL.
   // Never issue plaintext requests, follow redirects, or expose signed URLs.
   router.get('/product-feed/https-probe',async(_req,res)=>{
     res.set('Cache-Control','no-store');
+    const remaining=Math.ceil((feedInspectionCooldownUntil-Date.now())/1000);
+    if(remaining>0){res.set('Retry-After',String(remaining));return res.status(429).json({error:'Supplier feed diagnostics are cooling down',retry_after_seconds:remaining,read_only:true});}
+    let step='feed_request';
     try{
+      reserveFeedWindow(); // Reserve before await: concurrent diagnostics cannot duplicate the API call.
       const feed=await client().getProductFeed({optional_columns:'retail_map,specifications',primary_image_only_flag:1});
+      reserveFeedWindow(); // The documented interval begins conservatively after completion.
       const link=feed?.product_feed?.url;
       if(typeof link!=='string')return res.status(502).json({error:'Supplier did not return a feed URL',read_only:true});
       const original=new URL(link);
@@ -160,15 +178,24 @@ export function createChattanoogaRouter(pool) {
       const controller=new AbortController();
       const timer=setTimeout(()=>controller.abort(),8000);
       try{
+        step='https_head';
         const response=await fetch(candidate,{method:'HEAD',redirect:'error',signal:controller.signal,
           headers:{Accept:'text/csv'}});
+        if(response.status===429){
+          const retry=rateLimitFeed(parseRetryAfterSeconds(response.headers.get('retry-after'),Date.now()));
+          res.set('Retry-After',String(retry));
+          return res.status(429).json({error:'Supplier HTTPS capability request rate limited',stage:step,retry_after_seconds:retry,read_only:true});
+        }
         res.json({original_scheme:original.protocol.slice(0,-1),https_head_status:response.status,
           https_responded:response.ok,content_type_is_csv:/csv|octet-stream/i.test(response.headers.get('content-type')||''),
           read_only:true,notice:'HTTPS HEAD request only; no CSV downloaded, URLs or credentials returned. A successful HEAD does not prove CSV content is valid.'});
       }finally{clearTimeout(timer);}
     }catch(e){
-      console.error('Chattanooga HTTPS feed probe',{name:e?.name,status:e?.status===429?429:undefined});
-      res.status(e?.status===429?429:502).json({error:'HTTPS feed capability probe unavailable',read_only:true});
+      const rateLimited=e?.status===429||e?.code==='too-many-requests';
+      const retry=rateLimited?rateLimitFeed(e?.retryAfterSeconds):undefined;
+      if(rateLimited)res.set('Retry-After',String(retry));
+      console.error('Chattanooga HTTPS feed probe',{stage:step,status:rateLimited?429:undefined});
+      res.status(rateLimited?429:502).json({error:'HTTPS feed capability probe unavailable',stage:step,...(rateLimited?{retry_after_seconds:retry}:{}),read_only:true});
     }
   });
   router.get('/field-diagnostics',async(_req,res)=>{try{
@@ -759,3 +786,4 @@ export function createChattanoogaRouter(pool) {
   });
   return router;
 }
+
