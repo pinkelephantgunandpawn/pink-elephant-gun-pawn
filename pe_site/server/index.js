@@ -30,7 +30,7 @@ async function ensureBootstrapAdmin(){
   if(!email || !password) return;
   if(password.length < 12) throw new Error('ADMIN_PASSWORD must be at least 12 characters');
   const hash=await bcrypt.hash(password,12);
-  await pool.query(`INSERT INTO users(email,password_hash,role,active) VALUES($1,$2,'admin',true) ON CONFLICT(email) DO UPDATE SET password_hash=EXCLUDED.password_hash, role='admin', active=true`,[email,hash]);
+  await pool.query(`INSERT INTO users(email,password_hash,role,active) VALUES($1,$2,'admin',true) ON CONFLICT(email) DO NOTHING`,[email,hash]);
 }
 if (!process.env.DATABASE_URL || !process.env.JWT_SECRET) throw new Error('DATABASE_URL and JWT_SECRET are required');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false });
