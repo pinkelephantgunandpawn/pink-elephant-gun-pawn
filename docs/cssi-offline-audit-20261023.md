@@ -1,5 +1,7 @@
 # CSSI offline technical audit — October 23, 2026
 
+Historical findings at the October 23 review. The October 24 follow-up and current release assessment are in [release-readiness-20261024.md](release-readiness-20261024.md); that document supersedes implementation limitations and test counts below that were subsequently fixed.
+
 ## Scope and production baseline
 
 Production was observed live at `51ea3dc4f53798ec6b308423238a3bdb9b7515d9`, deployment `dep-dbdr373m8hqs73csb240`. Workspace `tea-da88qn7avr4c73eq2kog`; service `srv-da8o78egekts73dd4rug`. This session made no supplier API requests, CSV downloads, production writes, configuration changes, merges, deployments, or supplier communications. No catalog image mapping/population or sales functionality was implemented.
