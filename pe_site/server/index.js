@@ -1,3 +1,4 @@
+import { createInventoryWorkspaceRouter, blockInventoryWorkspaceTemplate } from './inventory_workspace.js';
 import { prepareStartup } from './startup_policy.js';
 import 'dotenv/config';
 import { createChattanoogaRouter } from './chattanooga_routes.js';
@@ -153,6 +154,7 @@ app.get('/chattanooga.html',(_req,res)=>{
   res.set({'Cache-Control':'no-store, no-cache, must-revalidate, max-age=0','Pragma':'no-cache','Expires':'0'});
   res.sendFile(path.join(__dirname,'..','chattanooga.html'));
 });
+app.use(blockInventoryWorkspaceTemplate);
 app.use(express.static(path.join(__dirname,'..')));
 app.get('/', (_req,res)=>res.sendFile(path.join(__dirname,'..','index.html')));
 app.get('/admin', (_req,res)=>res.sendFile(path.join(__dirname,'..','admin.html')));
@@ -1610,6 +1612,7 @@ app.get('/api/reports/year-end',auth,requireRole('manager'),async(req,res)=>{
   }catch(e){console.error(e);res.status(500).json({error:'Could not build year-end report'})}
 });
 
+app.use('/api/admin/inventory-workspace',createInventoryWorkspaceRouter({pool,auth,requireRole}));
 app.use('/api/admin/chattanooga',auth,requireRole('manager'),createChattanoogaRouter(pool));
 app.get('/api/audit',auth,requireRole('admin'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,user_id,action,entity_type,entity_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 500');res.json(rows);});
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).json({error:'Internal server error'});});
