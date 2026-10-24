@@ -1,3 +1,4 @@
+import { prepareStartup } from './startup_policy.js';
 import 'dotenv/config';
 import { createChattanoogaRouter } from './chattanooga_routes.js';
 import express from 'express';
@@ -1612,4 +1613,4 @@ app.get('/api/reports/year-end',auth,requireRole('manager'),async(req,res)=>{
 app.use('/api/admin/chattanooga',auth,requireRole('manager'),createChattanoogaRouter(pool));
 app.get('/api/audit',auth,requireRole('admin'),async(_req,res)=>{const {rows}=await pool.query('SELECT id,user_id,action,entity_type,entity_id,metadata,created_at FROM audit_log ORDER BY created_at DESC LIMIT 500');res.json(rows);});
 app.use((err,_req,res,_next)=>{console.error(err);res.status(500).json({error:'Internal server error'});});
-ensureSchema().then(()=>ensureBootstrapAdmin()).then(()=>app.listen(port,'0.0.0.0',()=>{console.log(`Pink Elephant API listening on ${port}`);if(r2Config())setTimeout(()=>migrateImagesToR2().then(r=>console.log('R2 image migration complete',r)).catch(e=>console.error('R2 image migration failed',e)),1500)})).catch(err=>{console.error(err);process.exit(1)});
+prepareStartup({mode:process.env.PE_STARTUP_MODE||'normal',pool,initializeSchema:ensureSchema,bootstrapAdmin:ensureBootstrapAdmin}).then(({allowImageMigration})=>app.listen(port,'0.0.0.0',()=>{console.log(`Pink Elephant API listening on ${port}`);if(allowImageMigration&&r2Config())setTimeout(()=>migrateImagesToR2().then(r=>console.log('R2 image migration complete',r)).catch(e=>console.error('R2 image migration failed',e)),1500)})).catch(err=>{console.error(err);process.exit(1)});
