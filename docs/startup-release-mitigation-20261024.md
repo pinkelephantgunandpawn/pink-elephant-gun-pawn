@@ -54,3 +54,8 @@ Owner approval is needed to include this mitigation and set PE_STARTUP_MODE=read
 After approval in principle, verify live admin credentials securely, application schema dependency, exact artifacts/CI and how Render can apply the variable and new code in one approved deployment. No additional approval is implied for changing passwords, product data, DATABASE_URL, schema, security checks or transactions. If any gate remains unknown, keep release held.
 
 Rollback requires separate approval. Preserve the original restore point and all current data. A rollback to code that lacks this flag would again execute its original startup writers, so do not assume an older artifact is a safe no-write rollback. Any rollback procedure must explicitly address that risk before execution.
+
+
+## Stacked-PR CI correction
+
+The existing workflow only ran for PRs targeting main, so the mitigation PR targeting the release branch initially received no verification/audit jobs. Extend only the pull_request branch filter to main and release/**. Main push behavior, read-only token permissions, all tests and the security audit remain unchanged. This ensures the stacked mitigation receives the same checks rather than treating missing checks as passing. YAML structure and unchanged permissions were checked locally.

@@ -6,7 +6,7 @@ on:
       - 'pe_site/server/**'
       - '.github/workflows/chattanooga-checks.yml'
   pull_request:
-    branches: [main]
+    branches: [main, 'release/**']
     paths:
       - 'pe_site/server/**'
       - '.github/workflows/chattanooga-checks.yml'
