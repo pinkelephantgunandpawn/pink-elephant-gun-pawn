@@ -11,7 +11,7 @@ export function selectItems(items,{query='',category='',stock='',image='',sort='
 const approvedHosts=new Set(['images.unsplash.com','images.pexels.com']);
 export function imageSource(value){
  if(!value)return {status:'missing'};
- if(/^assets\/[a-z-]+\.svg$/.test(value))return {status:'local',url:value};
+ if(/^assets\/[a-z-]+\.svg$/.test(value))return {status:'local',url:typeof workspaceAssets==='undefined'?value:workspaceAssets[value]};
  if(/[\x00-\x20\x7f]/.test(value))return {status:'invalid'};
  try{const u=new URL(value);if(u.protocol!=='https:'||u.username||u.password||u.port||u.hash)return {status:'invalid'};if(!approvedHosts.has(u.hostname))return {status:'host_review'};return {status:'external',url:u.href,host:u.hostname};}catch{return {status:'invalid'};}
 }
