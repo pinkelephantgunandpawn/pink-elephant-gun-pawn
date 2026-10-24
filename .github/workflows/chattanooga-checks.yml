@@ -4,11 +4,13 @@ on:
     branches: [main]
     paths:
       - 'pe_site/server/**'
+      - 'tools/inventory-dashboard/**'
       - '.github/workflows/chattanooga-checks.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
       - 'pe_site/server/**'
+      - 'tools/inventory-dashboard/**'
       - '.github/workflows/chattanooga-checks.yml'
   workflow_dispatch:
 permissions:
@@ -28,6 +30,8 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run safety regression tests
         run: npm test
+      - name: Run generic dashboard regression tests
+        run: node --test ../../tools/inventory-dashboard/test/*.test.mjs
   dependency-audit:
     runs-on: ubuntu-latest
     defaults:
@@ -50,3 +54,4 @@ jobs:
           path: pe_site/server/npm-audit.json
           if-no-files-found: warn
           retention-days: 14
+
