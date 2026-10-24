@@ -68,3 +68,10 @@ test('supplier rate limit remains 429 and executes no database query',async()=>{
   assert.equal(h.queries.length,0);
   assert.doesNotMatch(JSON.stringify(result.body),/private credential/);
 });
+test('missing supplier identifiers do not reach SQL array matching',async()=>{
+  const h=setup([{}, {cssi_id:null}, {cssi_id:''}]);
+  const result=await h.run();
+  assert.equal(result.status,200);
+  assert.equal(h.queries.length,1);
+  assert.equal(result.body.supplier_sample.count,0);
+});
